@@ -66,7 +66,10 @@ const visitSources = ['인터넷', '외부 소개', '지인 소개', '기존', '
 const paymentMethods = ['카드', '계좌이체', '현금'];
 const paymentStatuses = ['완납', '예약금', '잔금', '환불'];
 const customerGrades = ['일반', 'VIP', 'VVIP'];
-const staffPositions = ['사원', '팀장', '실장', '이사', '원장'];
+const staffPositions = ['사원', '팀장', '실장', '매니저', '이사', '원장'];
+
+// 공지 작성 권한이 있는 직급
+const announcementPermissions = ['실장', '매니저', '이사', '원장'];
 
 // 예약 시간 옵션 (09:00 ~ 22:00)
 const timeSlots = [
@@ -302,6 +305,9 @@ export default function PlanitAdmin() {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const notificationRef = useRef(null);
 
+  // 공지 작성 권한 확인
+  const canWriteAnnouncement = userProfile && announcementPermissions.includes(userProfile.position);
+
   // 클릭 외부 감지
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -503,7 +509,8 @@ export default function PlanitAdmin() {
         ...announcementData,
         read: {},
         createdAt: serverTimestamp(),
-        createdBy: user.email
+        createdBy: userProfile?.name || user.email,
+        createdByPosition: userProfile?.position || ''
       });
 
       await addDoc(collection(db, 'notifications'), {
@@ -634,6 +641,14 @@ export default function PlanitAdmin() {
     ).sort((a, b) => (a.appointmentTime || '').localeCompare(b.appointmentTime || ''));
   };
 
+  // 오늘 전체 예약 고객
+  const getTodayAppointments = () => {
+    const today = new Date().toISOString().split('T')[0];
+    return customers
+      .filter(c => c.date === today && c.appointmentTime)
+      .sort((a, b) => a.appointmentTime.localeCompare(b.appointmentTime));
+  };
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-zinc-100 flex items-center justify-center">
@@ -654,6 +669,7 @@ export default function PlanitAdmin() {
   const dailyRevenue = getDailyRevenue(customers);
   const sourceStats = getSourceStats(customers);
   const todayVIPCustomers = getTodayVIPCustomers();
+  const todayAppointments = getTodayAppointments();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-zinc-100 text-slate-800 flex">
@@ -881,10 +897,48 @@ export default function PlanitAdmin() {
                     ))}
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {/* 상단 통계 카드 + VIP 박스 */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     <StatCard icon={TrendingUp} label="총 매출" value={`₩${stats.totalRevenue.toLocaleString()}`} color="slate" />
+                    
+                    {/* VIP 고객 미니 박스 */}
+                    <div className="bg-gradient-to-br from-amber-50 to-purple-50 border border-amber-200 rounded-2xl p-4 shadow-lg">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Crown className="text-amber-500" size={18} />
+                        <span className="text-sm font-medium text-slate-600">오늘의 VIP</span>
+                        {todayVIPCustomers.length > 0 && (
+                          <span className="ml-auto px-2 py-0.5 bg-amber-200 text-amber-800 rounded-full text-xs font-bold">
+                            {todayVIPCustomers.length}명
+                          </span>
+                        )}
+                      </div>
+                      <div className="space-y-2 max-h-[80px] overflow-y-auto">
+                        {todayVIPCustomers.length > 0 ? (
+                          todayVIPCustomers.map(customer => (
+                            <button
+                              key={customer.id}
+                              onClick={() => handleViewDetail(customer)}
+                              className={`w-full flex items-center gap-2 p-2 rounded-lg text-left transition-all hover:scale-[1.02] ${
+                                customer.grade === 'VVIP' ? 'bg-amber-100/70' : 'bg-purple-100/70'
+                              }`}
+                            >
+                              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs ${
+                                customer.grade === 'VVIP' ? 'bg-amber-500' : 'bg-purple-500'
+                              }`}>
+                                {customer.grade === 'VVIP' ? <Crown size={12} /> : <Star size={12} />}
+                              </div>
+                              <span className="font-medium text-slate-700 text-sm truncate flex-1">{customer.name}</span>
+                              <span className="text-xs text-slate-500">{customer.appointmentTime || '-'}</span>
+                            </button>
+                          ))
+                        ) : (
+                          <p className="text-center text-slate-400 text-sm py-2">오늘 VIP 없음</p>
+                        )}
+                      </div>
+                    </div>
+
                     <StatCard icon={Users} label="내원 고객" value={`${stats.customerCount}명`} color="zinc" />
-                    <StatCard icon={Calendar} label="오늘 예약" value={`${getAppointmentsForDate(new Date().toISOString().split('T')[0]).length}건`} color="stone" />
+                    <StatCard icon={Calendar} label="오늘 예약" value={`${todayAppointments.length}건`} color="stone" />
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -904,50 +958,64 @@ export default function PlanitAdmin() {
                       </ResponsiveContainer>
                     </div>
 
-                    {/* VIP/VVIP 고객 예약 */}
-                    <div className="bg-gradient-to-br from-amber-50 to-purple-50 backdrop-blur-sm rounded-2xl border border-amber-200 p-6 shadow-lg">
-                      <h3 className="text-lg font-semibold mb-6 text-slate-700 flex items-center gap-2">
-                        <Crown className="text-amber-500" size={20} />
-                        오늘의 VIP 고객
+                    {/* 오늘의 예약 */}
+                    <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
+                      <h3 className="text-lg font-semibold mb-4 text-slate-700 flex items-center gap-2">
+                        <Calendar size={20} />
+                        오늘의 예약
+                        <span className="ml-auto text-sm font-normal text-slate-400">{todayAppointments.length}건</span>
                       </h3>
                       <div className="space-y-2 max-h-[280px] overflow-y-auto">
-                        {todayVIPCustomers.length > 0 ? (
-                          todayVIPCustomers.map(customer => (
-                            <div 
-                              key={customer.id} 
-                              className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer hover:scale-[1.02] transition-all ${
-                                customer.grade === 'VVIP' 
-                                  ? 'bg-gradient-to-r from-amber-100 to-amber-50 border border-amber-200' 
-                                  : 'bg-gradient-to-r from-purple-100 to-purple-50 border border-purple-200'
+                        {todayAppointments.length > 0 ? (
+                          todayAppointments.map(apt => (
+                            <button
+                              key={apt.id}
+                              onClick={() => handleViewDetail(apt)}
+                              className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all hover:scale-[1.01] ${
+                                apt.grade === 'VVIP' ? 'bg-gradient-to-r from-amber-50 to-amber-100/50 border border-amber-200' :
+                                apt.grade === 'VIP' ? 'bg-gradient-to-r from-purple-50 to-purple-100/50 border border-purple-200' :
+                                'bg-slate-50 hover:bg-slate-100'
                               }`}
-                              onClick={() => handleViewDetail(customer)}
                             >
-                              <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold ${
-                                customer.grade === 'VVIP' ? 'bg-amber-500' : 'bg-purple-500'
+                              <div className="w-14 text-center">
+                                <span className="font-medium text-slate-600">{apt.appointmentTime}</span>
+                              </div>
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium ${
+                                apt.grade === 'VVIP' ? 'bg-amber-500' :
+                                apt.grade === 'VIP' ? 'bg-purple-500' :
+                                'bg-slate-400'
                               }`}>
-                                {customer.grade === 'VVIP' ? <Crown size={18} /> : <Star size={18} />}
+                                {apt.grade === 'VVIP' ? <Crown size={14} /> :
+                                 apt.grade === 'VIP' ? <Star size={14} /> :
+                                 apt.name?.[0]}
                               </div>
-                              <div className="flex-1">
+                              <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
-                                  <p className="font-semibold text-slate-700">{customer.name}</p>
-                                  <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
-                                    customer.grade === 'VVIP' ? 'bg-amber-200 text-amber-800' : 'bg-purple-200 text-purple-800'
-                                  }`}>
-                                    {customer.grade}
-                                  </span>
+                                  <p className="font-medium text-slate-700">{apt.name}</p>
+                                  {apt.grade && apt.grade !== '일반' && (
+                                    <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
+                                      apt.grade === 'VVIP' ? 'bg-amber-200 text-amber-800' : 'bg-purple-200 text-purple-800'
+                                    }`}>
+                                      {apt.grade}
+                                    </span>
+                                  )}
                                 </div>
-                                <p className="text-sm text-slate-500">{customer.procedure}</p>
+                                <p className="text-sm text-slate-500 truncate">{apt.procedure}</p>
                               </div>
-                              <div className="text-right">
-                                <p className="font-medium text-slate-600">{customer.appointmentTime || '-'}</p>
-                                <p className="text-xs text-slate-400">{customer.staffName || '-'}</p>
-                              </div>
-                            </div>
+                              <span className={`px-2 py-1 rounded-md text-xs font-medium ${
+                                apt.category === '수술' ? 'bg-red-100 text-red-700' :
+                                apt.category === '피부시술' ? 'bg-blue-100 text-blue-700' :
+                                apt.category === '상담' ? 'bg-green-100 text-green-700' :
+                                'bg-gray-100 text-gray-700'
+                              }`}>
+                                {apt.category}
+                              </span>
+                            </button>
                           ))
                         ) : (
                           <div className="text-center py-8 text-slate-400">
-                            <Crown className="mx-auto mb-2 opacity-30" size={32} />
-                            <p>오늘 VIP 예약이 없습니다</p>
+                            <Calendar className="mx-auto mb-2 opacity-30" size={32} />
+                            <p>오늘 예약이 없습니다</p>
                           </div>
                         )}
                       </div>
@@ -1276,13 +1344,19 @@ export default function PlanitAdmin() {
                 <div className="space-y-6">
                   <div className="flex items-center justify-between">
                     <h2 className="text-lg font-semibold text-slate-700">공지사항 목록</h2>
-                    <button
-                      onClick={() => { setEditingAnnouncement(null); setShowAnnouncementModal(true); }}
-                      className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-slate-600 to-gray-600 rounded-xl text-white font-medium hover:from-slate-700 hover:to-gray-700 transition-all shadow-lg"
-                    >
-                      <Plus size={18} />
-                      <span>공지 작성</span>
-                    </button>
+                    {canWriteAnnouncement ? (
+                      <button
+                        onClick={() => { setEditingAnnouncement(null); setShowAnnouncementModal(true); }}
+                        className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-slate-600 to-gray-600 rounded-xl text-white font-medium hover:from-slate-700 hover:to-gray-700 transition-all shadow-lg"
+                      >
+                        <Plus size={18} />
+                        <span>공지 작성</span>
+                      </button>
+                    ) : (
+                      <div className="text-sm text-slate-400">
+                        공지 작성 권한: 실장, 매니저, 이사, 원장
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-4">
@@ -1312,24 +1386,26 @@ export default function PlanitAdmin() {
                                 </div>
                                 <p className="text-slate-600 whitespace-pre-wrap">{announcement.content}</p>
                                 <div className="flex items-center gap-4 mt-4 text-sm text-slate-400">
-                                  <span>{announcement.createdBy}</span>
+                                  <span>{announcement.createdBy} {announcement.createdByPosition && `(${announcement.createdByPosition})`}</span>
                                   <span>{formatTimeAgo(announcement.createdAt)}</span>
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  onClick={() => { setEditingAnnouncement(announcement); setShowAnnouncementModal(true); }}
-                                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-                                >
-                                  <Edit2 size={16} />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteAnnouncement(announcement.id)}
-                                  className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                                >
-                                  <Trash2 size={16} />
-                                </button>
-                              </div>
+                              {canWriteAnnouncement && (
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => { setEditingAnnouncement(announcement); setShowAnnouncementModal(true); }}
+                                    className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                                  >
+                                    <Edit2 size={16} />
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteAnnouncement(announcement.id)}
+                                    className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                  >
+                                    <Trash2 size={16} />
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -1391,7 +1467,7 @@ export default function PlanitAdmin() {
       {showModal && (
         <CustomerModal
           customer={editingCustomer}
-          staffList={staffList}
+          userProfile={userProfile}
           onSave={handleSaveCustomer}
           onClose={() => { setShowModal(false); setEditingCustomer(null); }}
         />
@@ -1450,17 +1526,17 @@ function StatCard({ icon: Icon, label, value, color }) {
   );
 }
 
-// 고객 모달
-function CustomerModal({ customer, staffList, onSave, onClose }) {
+// 고객 모달 (담당자 자동 설정)
+function CustomerModal({ customer, userProfile, onSave, onClose }) {
   const [form, setForm] = useState(customer || {
     name: '',
     phone: '',
     grade: '일반',
     category: '수술',
     procedure: '',
-    staffId: '',
-    staffName: '',
-    staffPosition: '',
+    staffId: userProfile?.id || '',
+    staffName: userProfile?.name || '',
+    staffPosition: userProfile?.position || '',
     visitSource: '인터넷',
     paymentMethod: '카드',
     paymentStatus: '완납',
@@ -1470,31 +1546,20 @@ function CustomerModal({ customer, staffList, onSave, onClose }) {
     memo: ''
   });
 
+  // 새 고객 등록 시 담당자 자동 설정
+  useEffect(() => {
+    if (!customer && userProfile) {
+      setForm(prev => ({
+        ...prev,
+        staffName: userProfile.name || '',
+        staffPosition: userProfile.position || ''
+      }));
+    }
+  }, [customer, userProfile]);
+
   const handlePhoneChange = (e) => {
     const formatted = formatPhoneNumber(e.target.value);
     setForm({ ...form, phone: formatted });
-  };
-
-  const handleStaffChange = (e) => {
-    const staffId = e.target.value;
-    if (staffId) {
-      const staff = staffList.find(s => s.id === staffId);
-      if (staff) {
-        setForm({
-          ...form,
-          staffId: staff.id,
-          staffName: staff.name,
-          staffPosition: staff.position
-        });
-      }
-    } else {
-      setForm({
-        ...form,
-        staffId: '',
-        staffName: '',
-        staffPosition: ''
-      });
-    }
   };
 
   const handleSubmit = (e) => {
@@ -1556,18 +1621,12 @@ function CustomerModal({ customer, staffList, onSave, onClose }) {
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-600 mb-2">담당자</label>
-              <select
-                value={form.staffId}
-                onChange={handleStaffChange}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
-              >
-                <option value="">선택하세요</option>
-                {staffList.map(staff => (
-                  <option key={staff.id} value={staff.id}>
-                    {staff.name} ({staff.position})
-                  </option>
-                ))}
-              </select>
+              <input
+                type="text"
+                value={form.staffName ? `${form.staffName} (${form.staffPosition})` : '프로필을 먼저 설정하세요'}
+                disabled
+                className="w-full px-4 py-2.5 bg-slate-100 border border-slate-200 rounded-xl text-slate-600"
+              />
             </div>
           </div>
 
