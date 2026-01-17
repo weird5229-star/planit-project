@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff, Camera, Clock, ChevronLeft, ChevronRight, Image, Megaphone, UserPlus, Star, User, Crown } from 'lucide-react';
+import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff, Camera, Clock, ChevronLeft, ChevronRight, Image, Megaphone, UserPlus, Star, User, Crown, UserX, RefreshCcw } from 'lucide-react';
 
 // Firebase imports
 import { auth, db, storage } from './firebase';
@@ -66,6 +66,7 @@ const visitSources = ['인터넷', '외부 소개', '지인 소개', '기존', '
 const paymentMethods = ['카드', '계좌이체', '현금'];
 const paymentStatuses = ['완납', '예약금', '잔금', '환불'];
 const customerGrades = ['일반', 'VIP', 'VVIP'];
+const customerStatuses = ['예약', '내원', '노쇼', '환불'];
 const staffPositions = ['사원', '팀장', '실장', '매니저', '이사', '원장'];
 
 // 공지 작성 권한이 있는 직급
@@ -88,6 +89,9 @@ const proceduresByCategory = {
   '관리': ['리프팅관리', '재생관리', '미백관리', '모공관리', '여드름관리', '탄력관리']
 };
 
+// 파스텔 색상 (차트용)
+const PASTEL_COLORS = ['#FFB3BA', '#BAFFC9', '#BAE1FF', '#FFFFBA', '#FFDFBa'];
+
 // 통계 계산 함수
 const calculateStats = (customers, period = 'day') => {
   const today = new Date();
@@ -105,14 +109,20 @@ const calculateStats = (customers, period = 'day') => {
   });
   
   const totalRevenue = filtered
-    .filter(c => c.paymentStatus !== '환불')
+    .filter(c => c.paymentStatus !== '환불' && c.status !== '노쇼' && c.status !== '환불')
     .reduce((sum, c) => sum + (c.amount > 0 ? c.amount : 0), 0);
   
   const totalRefund = filtered
-    .filter(c => c.paymentStatus === '환불')
+    .filter(c => c.paymentStatus === '환불' || c.status === '환불')
     .reduce((sum, c) => sum + Math.abs(c.amount || 0), 0);
   
-  const customerCount = filtered.filter(c => c.paymentStatus !== '환불').length;
+  // 내원 고객: 노쇼, 환불 제외
+  const customerCount = filtered.filter(c => 
+    c.paymentStatus !== '환불' && 
+    c.status !== '노쇼' && 
+    c.status !== '환불'
+  ).length;
+  
   const consultCount = filtered.filter(c => c.category === '상담' && c.paymentStatus !== '환불').length;
   
   return { totalRevenue, totalRefund, customerCount, consultCount, netRevenue: totalRevenue - totalRefund };
@@ -122,7 +132,7 @@ const getCategoryRevenue = (customers) => {
   const categoryData = {};
   categories.forEach(cat => {
     categoryData[cat] = customers
-      .filter(c => c.category === cat && c.amount > 0 && c.paymentStatus !== '환불')
+      .filter(c => c.category === cat && c.amount > 0 && c.paymentStatus !== '환불' && c.status !== '환불')
       .reduce((sum, c) => sum + c.amount, 0);
   });
   return Object.entries(categoryData)
@@ -137,7 +147,7 @@ const getDailyRevenue = (customers) => {
     date.setDate(date.getDate() - i);
     const dateStr = date.toISOString().split('T')[0];
     const dayRevenue = customers
-      .filter(c => c.date === dateStr && c.amount > 0 && c.paymentStatus !== '환불')
+      .filter(c => c.date === dateStr && c.amount > 0 && c.paymentStatus !== '환불' && c.status !== '환불')
       .reduce((sum, c) => sum + c.amount, 0);
     data.push({
       date: `${date.getMonth() + 1}/${date.getDate()}`,
@@ -150,14 +160,12 @@ const getDailyRevenue = (customers) => {
 const getSourceStats = (customers) => {
   const sourceData = {};
   visitSources.forEach(source => {
-    sourceData[source] = customers.filter(c => c.visitSource === source && c.paymentStatus !== '환불').length;
+    sourceData[source] = customers.filter(c => c.visitSource === source && c.paymentStatus !== '환불' && c.status !== '환불').length;
   });
   return Object.entries(sourceData)
     .filter(([name, value]) => value > 0)
     .map(([name, value]) => ({ name, value }));
 };
-
-const COLORS = ['#64748b', '#78716c', '#71717a', '#6b7280', '#737373'];
 
 // 로그인 컴포넌트
 function LoginPage() {
@@ -296,6 +304,7 @@ export default function PlanitAdmin() {
   const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showNewCustomersModal, setShowNewCustomersModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState(null);
   const [editingAnnouncement, setEditingAnnouncement] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
@@ -443,6 +452,7 @@ export default function PlanitAdmin() {
     try {
       const docRef = await addDoc(collection(db, 'customers'), {
         ...customerData,
+        status: '예약',
         createdAt: serverTimestamp(),
         createdBy: user.email
       });
@@ -498,6 +508,47 @@ export default function PlanitAdmin() {
       } catch (error) {
         console.error('Error deleting customer:', error);
         alert('고객 삭제에 실패했습니다.');
+      }
+    }
+  };
+
+  // 노쇼 처리
+  const handleNoShow = async (customerId) => {
+    if (confirm('노쇼 처리하시겠습니까?')) {
+      try {
+        const customerRef = doc(db, 'customers', customerId);
+        await updateDoc(customerRef, {
+          status: '노쇼',
+          updatedAt: serverTimestamp(),
+          updatedBy: user.email
+        });
+        
+        // selectedCustomer 업데이트
+        setSelectedCustomer(prev => prev ? { ...prev, status: '노쇼' } : null);
+      } catch (error) {
+        console.error('Error marking no-show:', error);
+        alert('노쇼 처리에 실패했습니다.');
+      }
+    }
+  };
+
+  // 환불 처리
+  const handleRefund = async (customerId) => {
+    if (confirm('환불 처리하시겠습니까?')) {
+      try {
+        const customerRef = doc(db, 'customers', customerId);
+        await updateDoc(customerRef, {
+          status: '환불',
+          paymentStatus: '환불',
+          updatedAt: serverTimestamp(),
+          updatedBy: user.email
+        });
+        
+        // selectedCustomer 업데이트
+        setSelectedCustomer(prev => prev ? { ...prev, status: '환불', paymentStatus: '환불' } : null);
+      } catch (error) {
+        console.error('Error processing refund:', error);
+        alert('환불 처리에 실패했습니다.');
       }
     }
   };
@@ -613,9 +664,9 @@ export default function PlanitAdmin() {
   });
 
   const exportCSV = () => {
-    const headers = ['이름', '연락처', '등급', '대분류', '시술명', '담당자', '내원경로', '결제수단', '납부상태', '금액', '날짜', '예약시간', '메모'];
+    const headers = ['이름', '연락처', '등급', '상태', '대분류', '시술명', '담당자', '내원경로', '결제수단', '납부상태', '금액', '날짜', '예약시간', '메모'];
     const rows = filteredCustomers.map(c => [
-      c.name, c.phone, c.grade || '일반', c.category, c.procedure, c.staffName || '', c.visitSource, c.paymentMethod, c.paymentStatus, c.amount, c.date, c.appointmentTime || '', c.memo
+      c.name, c.phone, c.grade || '일반', c.status || '예약', c.category, c.procedure, c.staffName || '', c.visitSource, c.paymentMethod, c.paymentStatus, c.amount, c.date, c.appointmentTime || '', c.memo
     ]);
     const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -626,27 +677,18 @@ export default function PlanitAdmin() {
     a.click();
   };
 
-  const getAppointmentsForDate = (date) => {
-    return customers
-      .filter(c => c.date === date && c.appointmentTime)
-      .sort((a, b) => a.appointmentTime.localeCompare(b.appointmentTime));
-  };
-
-  // 오늘 VIP/VVIP 예약 고객
-  const getTodayVIPCustomers = () => {
-    const today = new Date().toISOString().split('T')[0];
-    return customers.filter(c => 
-      c.date === today && 
-      (c.grade === 'VIP' || c.grade === 'VVIP')
-    ).sort((a, b) => (a.appointmentTime || '').localeCompare(b.appointmentTime || ''));
-  };
-
   // 오늘 전체 예약 고객
   const getTodayAppointments = () => {
     const today = new Date().toISOString().split('T')[0];
     return customers
       .filter(c => c.date === today && c.appointmentTime)
       .sort((a, b) => a.appointmentTime.localeCompare(b.appointmentTime));
+  };
+
+  // 오늘 신규 고객 (당일 등록된 고객)
+  const getTodayNewCustomers = () => {
+    const today = new Date().toISOString().split('T')[0];
+    return customers.filter(c => c.date === today);
   };
 
   if (authLoading) {
@@ -668,8 +710,8 @@ export default function PlanitAdmin() {
   const categoryRevenue = getCategoryRevenue(customers);
   const dailyRevenue = getDailyRevenue(customers);
   const sourceStats = getSourceStats(customers);
-  const todayVIPCustomers = getTodayVIPCustomers();
   const todayAppointments = getTodayAppointments();
+  const todayNewCustomers = getTodayNewCustomers();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-zinc-100 text-slate-800 flex">
@@ -897,48 +939,27 @@ export default function PlanitAdmin() {
                     ))}
                   </div>
 
-                  {/* 상단 통계 카드 + VIP 박스 */}
+                  {/* 상단 통계 카드 */}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <StatCard icon={TrendingUp} label="총 매출" value={`₩${stats.totalRevenue.toLocaleString()}`} color="slate" />
+                    <StatCard icon={TrendingUp} label="총 매출" value={`₩${stats.totalRevenue.toLocaleString()}`} color="rose" />
                     
-                    {/* VIP 고객 미니 박스 */}
-                    <div className="bg-gradient-to-br from-amber-50 to-purple-50 border border-amber-200 rounded-2xl p-4 shadow-lg">
-                      <div className="flex items-center gap-2 mb-3">
-                        <Crown className="text-amber-500" size={18} />
-                        <span className="text-sm font-medium text-slate-600">오늘의 VIP</span>
-                        {todayVIPCustomers.length > 0 && (
-                          <span className="ml-auto px-2 py-0.5 bg-amber-200 text-amber-800 rounded-full text-xs font-bold">
-                            {todayVIPCustomers.length}명
-                          </span>
-                        )}
+                    {/* 신규 고객 박스 */}
+                    <div 
+                      className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-6 shadow-lg cursor-pointer hover:shadow-xl transition-all"
+                      onClick={() => setShowNewCustomersModal(true)}
+                    >
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="p-2 rounded-lg bg-white/70">
+                          <UserPlus size={20} className="text-emerald-600" />
+                        </div>
+                        <span className="text-sm font-medium text-emerald-600">오늘 신규</span>
                       </div>
-                      <div className="space-y-2 max-h-[80px] overflow-y-auto">
-                        {todayVIPCustomers.length > 0 ? (
-                          todayVIPCustomers.map(customer => (
-                            <button
-                              key={customer.id}
-                              onClick={() => handleViewDetail(customer)}
-                              className={`w-full flex items-center gap-2 p-2 rounded-lg text-left transition-all hover:scale-[1.02] ${
-                                customer.grade === 'VVIP' ? 'bg-amber-100/70' : 'bg-purple-100/70'
-                              }`}
-                            >
-                              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs ${
-                                customer.grade === 'VVIP' ? 'bg-amber-500' : 'bg-purple-500'
-                              }`}>
-                                {customer.grade === 'VVIP' ? <Crown size={12} /> : <Star size={12} />}
-                              </div>
-                              <span className="font-medium text-slate-700 text-sm truncate flex-1">{customer.name}</span>
-                              <span className="text-xs text-slate-500">{customer.appointmentTime || '-'}</span>
-                            </button>
-                          ))
-                        ) : (
-                          <p className="text-center text-slate-400 text-sm py-2">오늘 VIP 없음</p>
-                        )}
-                      </div>
+                      <p className="text-2xl font-bold text-slate-800">{todayNewCustomers.length}명</p>
+                      <p className="text-xs text-emerald-500 mt-1">클릭하여 명단 보기</p>
                     </div>
 
-                    <StatCard icon={Users} label="내원 고객" value={`${stats.customerCount}명`} color="zinc" />
-                    <StatCard icon={Calendar} label="오늘 예약" value={`${todayAppointments.length}건`} color="stone" />
+                    <StatCard icon={Users} label="내원 고객" value={`${stats.customerCount}명`} color="sky" />
+                    <StatCard icon={Calendar} label="오늘 예약" value={`${todayAppointments.length}건`} color="violet" />
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -953,7 +974,7 @@ export default function PlanitAdmin() {
                             contentStyle={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px' }}
                             formatter={(value) => [`₩${value.toLocaleString()}`, '매출']}
                           />
-                          <Line type="monotone" dataKey="매출" stroke="#64748b" strokeWidth={3} dot={{ fill: '#64748b', strokeWidth: 2 }} />
+                          <Line type="monotone" dataKey="매출" stroke="#f472b6" strokeWidth={3} dot={{ fill: '#f472b6', strokeWidth: 2 }} />
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
@@ -972,6 +993,8 @@ export default function PlanitAdmin() {
                               key={apt.id}
                               onClick={() => handleViewDetail(apt)}
                               className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all hover:scale-[1.01] ${
+                                apt.status === '노쇼' ? 'bg-red-50 border border-red-200 opacity-60' :
+                                apt.status === '환불' ? 'bg-gray-100 border border-gray-200 opacity-60' :
                                 apt.grade === 'VVIP' ? 'bg-gradient-to-r from-amber-50 to-amber-100/50 border border-amber-200' :
                                 apt.grade === 'VIP' ? 'bg-gradient-to-r from-purple-50 to-purple-100/50 border border-purple-200' :
                                 'bg-slate-50 hover:bg-slate-100'
@@ -981,18 +1004,30 @@ export default function PlanitAdmin() {
                                 <span className="font-medium text-slate-600">{apt.appointmentTime}</span>
                               </div>
                               <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium ${
+                                apt.status === '노쇼' ? 'bg-red-400' :
+                                apt.status === '환불' ? 'bg-gray-400' :
                                 apt.grade === 'VVIP' ? 'bg-amber-500' :
                                 apt.grade === 'VIP' ? 'bg-purple-500' :
                                 'bg-slate-400'
                               }`}>
-                                {apt.grade === 'VVIP' ? <Crown size={14} /> :
+                                {apt.status === '노쇼' ? <UserX size={14} /> :
+                                 apt.status === '환불' ? <RefreshCcw size={14} /> :
+                                 apt.grade === 'VVIP' ? <Crown size={14} /> :
                                  apt.grade === 'VIP' ? <Star size={14} /> :
                                  apt.name?.[0]}
                               </div>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
-                                  <p className="font-medium text-slate-700">{apt.name}</p>
-                                  {apt.grade && apt.grade !== '일반' && (
+                                  <p className={`font-medium ${apt.status === '노쇼' || apt.status === '환불' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
+                                    {apt.name}
+                                  </p>
+                                  {apt.status === '노쇼' && (
+                                    <span className="px-1.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">노쇼</span>
+                                  )}
+                                  {apt.status === '환불' && (
+                                    <span className="px-1.5 py-0.5 rounded text-xs font-bold bg-gray-200 text-gray-700">환불</span>
+                                  )}
+                                  {apt.grade && apt.grade !== '일반' && apt.status !== '노쇼' && apt.status !== '환불' && (
                                     <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
                                       apt.grade === 'VVIP' ? 'bg-amber-200 text-amber-800' : 'bg-purple-200 text-purple-800'
                                     }`}>
@@ -1003,10 +1038,10 @@ export default function PlanitAdmin() {
                                 <p className="text-sm text-slate-500 truncate">{apt.procedure}</p>
                               </div>
                               <span className={`px-2 py-1 rounded-md text-xs font-medium ${
-                                apt.category === '수술' ? 'bg-red-100 text-red-700' :
-                                apt.category === '피부시술' ? 'bg-blue-100 text-blue-700' :
-                                apt.category === '상담' ? 'bg-green-100 text-green-700' :
-                                'bg-gray-100 text-gray-700'
+                                apt.category === '수술' ? 'bg-rose-100 text-rose-700' :
+                                apt.category === '피부시술' ? 'bg-sky-100 text-sky-700' :
+                                apt.category === '상담' ? 'bg-emerald-100 text-emerald-700' :
+                                'bg-violet-100 text-violet-700'
                               }`}>
                                 {apt.category}
                               </span>
@@ -1038,7 +1073,7 @@ export default function PlanitAdmin() {
                               labelLine={{ stroke: '#94a3b8' }}
                             >
                               {categoryRevenue.map((entry, index) => (
-                                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                <Cell key={`cell-${index}`} fill={PASTEL_COLORS[index % PASTEL_COLORS.length]} />
                               ))}
                             </Pie>
                             <Tooltip formatter={(value) => [`₩${value.toLocaleString()}`, '매출']} />
@@ -1058,7 +1093,11 @@ export default function PlanitAdmin() {
                             <XAxis type="number" stroke="#64748b" fontSize={12} />
                             <YAxis type="category" dataKey="name" stroke="#64748b" fontSize={12} width={80} />
                             <Tooltip formatter={(value) => [`${value}명`, '고객 수']} />
-                            <Bar dataKey="value" fill="#64748b" radius={[0, 8, 8, 0]} />
+                            <Bar dataKey="value" radius={[0, 8, 8, 0]}>
+                              {sourceStats.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={PASTEL_COLORS[index % PASTEL_COLORS.length]} />
+                              ))}
+                            </Bar>
                           </BarChart>
                         </ResponsiveContainer>
                       ) : (
@@ -1126,6 +1165,7 @@ export default function PlanitAdmin() {
                           <tr className="border-b border-slate-100 bg-slate-50/50">
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">고객명</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">등급</th>
+                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">상태</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">연락처</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">시술</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">담당</th>
@@ -1137,22 +1177,30 @@ export default function PlanitAdmin() {
                         </thead>
                         <tbody>
                           {filteredCustomers.map(customer => (
-                            <tr key={customer.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                            <tr key={customer.id} className={`border-b border-slate-50 hover:bg-slate-50/50 transition-colors ${
+                              customer.status === '노쇼' || customer.status === '환불' ? 'opacity-60' : ''
+                            }`}>
                               <td className="px-6 py-4">
                                 <button
                                   onClick={() => handleViewDetail(customer)}
                                   className="flex items-center gap-3 hover:text-slate-900"
                                 >
                                   <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium ${
+                                    customer.status === '노쇼' ? 'bg-red-400' :
+                                    customer.status === '환불' ? 'bg-gray-400' :
                                     customer.grade === 'VVIP' ? 'bg-amber-500' :
                                     customer.grade === 'VIP' ? 'bg-purple-500' :
                                     'bg-gradient-to-br from-slate-400 to-gray-400'
                                   }`}>
-                                    {customer.grade === 'VVIP' ? <Crown size={14} /> :
+                                    {customer.status === '노쇼' ? <UserX size={14} /> :
+                                     customer.status === '환불' ? <RefreshCcw size={14} /> :
+                                     customer.grade === 'VVIP' ? <Crown size={14} /> :
                                      customer.grade === 'VIP' ? <Star size={14} /> :
                                      customer.name?.[0]}
                                   </div>
-                                  <span className="font-medium text-slate-700 hover:underline">{customer.name}</span>
+                                  <span className={`font-medium hover:underline ${
+                                    customer.status === '노쇼' || customer.status === '환불' ? 'text-slate-400 line-through' : 'text-slate-700'
+                                  }`}>{customer.name}</span>
                                 </button>
                               </td>
                               <td className="px-6 py-4">
@@ -1164,13 +1212,22 @@ export default function PlanitAdmin() {
                                   </span>
                                 )}
                               </td>
+                              <td className="px-6 py-4">
+                                {customer.status && (customer.status === '노쇼' || customer.status === '환불') && (
+                                  <span className={`px-2 py-1 rounded-md text-xs font-bold ${
+                                    customer.status === '노쇼' ? 'bg-red-100 text-red-700' : 'bg-gray-200 text-gray-700'
+                                  }`}>
+                                    {customer.status}
+                                  </span>
+                                )}
+                              </td>
                               <td className="px-6 py-4 text-slate-600">{customer.phone}</td>
                               <td className="px-6 py-4">
                                 <span className={`px-2 py-1 rounded-md text-xs font-medium ${
-                                  customer.category === '수술' ? 'bg-slate-200 text-slate-700' :
-                                  customer.category === '피부시술' ? 'bg-gray-200 text-gray-700' :
-                                  customer.category === '상담' ? 'bg-zinc-200 text-zinc-700' :
-                                  'bg-stone-200 text-stone-700'
+                                  customer.category === '수술' ? 'bg-rose-100 text-rose-700' :
+                                  customer.category === '피부시술' ? 'bg-sky-100 text-sky-700' :
+                                  customer.category === '상담' ? 'bg-emerald-100 text-emerald-700' :
+                                  'bg-violet-100 text-violet-700'
                                 }`}>
                                   {customer.procedure}
                                 </span>
@@ -1302,17 +1359,21 @@ export default function PlanitAdmin() {
                                       key={apt.id}
                                       onClick={() => handleViewDetail(apt)}
                                       className={`px-3 py-2 rounded-lg text-sm font-medium transition-all hover:scale-105 flex items-center gap-2 ${
+                                        apt.status === '노쇼' ? 'bg-red-100 text-red-700 border border-red-200 opacity-60' :
+                                        apt.status === '환불' ? 'bg-gray-100 text-gray-700 border border-gray-200 opacity-60' :
                                         apt.grade === 'VVIP' ? 'bg-amber-100 text-amber-700 border border-amber-300' :
                                         apt.grade === 'VIP' ? 'bg-purple-100 text-purple-700 border border-purple-300' :
-                                        apt.category === '수술' ? 'bg-red-100 text-red-700 border border-red-200' :
-                                        apt.category === '피부시술' ? 'bg-blue-100 text-blue-700 border border-blue-200' :
-                                        apt.category === '상담' ? 'bg-green-100 text-green-700 border border-green-200' :
-                                        'bg-gray-100 text-gray-700 border border-gray-200'
+                                        apt.category === '수술' ? 'bg-rose-100 text-rose-700 border border-rose-200' :
+                                        apt.category === '피부시술' ? 'bg-sky-100 text-sky-700 border border-sky-200' :
+                                        apt.category === '상담' ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' :
+                                        'bg-violet-100 text-violet-700 border border-violet-200'
                                       }`}
                                     >
-                                      {apt.grade === 'VVIP' && <Crown size={14} />}
-                                      {apt.grade === 'VIP' && <Star size={14} />}
-                                      <span className="font-semibold">{apt.name}</span>
+                                      {apt.status === '노쇼' && <UserX size={14} />}
+                                      {apt.status === '환불' && <RefreshCcw size={14} />}
+                                      {apt.grade === 'VVIP' && apt.status !== '노쇼' && apt.status !== '환불' && <Crown size={14} />}
+                                      {apt.grade === 'VIP' && apt.status !== '노쇼' && apt.status !== '환불' && <Star size={14} />}
+                                      <span className={`font-semibold ${apt.status === '노쇼' || apt.status === '환불' ? 'line-through' : ''}`}>{apt.name}</span>
                                       <span className="opacity-75">{apt.procedure}</span>
                                     </button>
                                   ))}
@@ -1331,10 +1392,12 @@ export default function PlanitAdmin() {
                     <span className="text-sm text-slate-500">범례:</span>
                     <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs flex items-center gap-1"><Crown size={12} /> VVIP</span>
                     <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs flex items-center gap-1"><Star size={12} /> VIP</span>
-                    <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">수술</span>
-                    <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">피부시술</span>
-                    <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">상담</span>
-                    <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">관리</span>
+                    <span className="px-2 py-1 bg-rose-100 text-rose-700 rounded text-xs">수술</span>
+                    <span className="px-2 py-1 bg-sky-100 text-sky-700 rounded text-xs">피부시술</span>
+                    <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded text-xs">상담</span>
+                    <span className="px-2 py-1 bg-violet-100 text-violet-700 rounded text-xs">관리</span>
+                    <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs flex items-center gap-1"><UserX size={12} /> 노쇼</span>
+                    <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs flex items-center gap-1"><RefreshCcw size={12} /> 환불</span>
                   </div>
                 </div>
               )}
@@ -1421,11 +1484,11 @@ export default function PlanitAdmin() {
                   <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
                     <h3 className="text-lg font-semibold mb-6 text-slate-700">시술 카테고리별 통계</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                      {categories.map(cat => {
-                        const catCustomers = customers.filter(c => c.category === cat && c.paymentStatus !== '환불');
+                      {categories.map((cat, index) => {
+                        const catCustomers = customers.filter(c => c.category === cat && c.paymentStatus !== '환불' && c.status !== '환불');
                         const catRevenue = catCustomers.reduce((sum, c) => sum + (c.amount > 0 ? c.amount : 0), 0);
                         return (
-                          <div key={cat} className="bg-slate-50/50 rounded-xl p-4">
+                          <div key={cat} className="rounded-xl p-4" style={{ backgroundColor: `${PASTEL_COLORS[index]}40` }}>
                             <h4 className="font-medium text-slate-600 mb-2">{cat}</h4>
                             <p className="text-2xl font-bold text-slate-800 mb-1">₩{catRevenue.toLocaleString()}</p>
                             <p className="text-sm text-slate-400">{catCustomers.length}건</p>
@@ -1443,7 +1506,7 @@ export default function PlanitAdmin() {
                           <h4 className="font-medium text-slate-600">{cat}</h4>
                           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                             {proceduresByCategory[cat].map(proc => {
-                              const count = customers.filter(c => c.procedure === proc && c.paymentStatus !== '환불').length;
+                              const count = customers.filter(c => c.procedure === proc && c.paymentStatus !== '환불' && c.status !== '환불').length;
                               return (
                                 <div key={proc} className="flex items-center justify-between px-3 py-2 bg-slate-50/50 rounded-lg">
                                   <span className="text-sm text-slate-600">{proc}</span>
@@ -1479,6 +1542,8 @@ export default function PlanitAdmin() {
           customer={selectedCustomer}
           onClose={() => { setShowDetailModal(false); setSelectedCustomer(null); }}
           onUpdate={(updated) => setSelectedCustomer(updated)}
+          onNoShow={handleNoShow}
+          onRefund={handleRefund}
         />
       )}
 
@@ -1500,6 +1565,15 @@ export default function PlanitAdmin() {
           onClose={() => setShowProfileModal(false)}
         />
       )}
+
+      {/* 신규 고객 모달 */}
+      {showNewCustomersModal && (
+        <NewCustomersModal
+          customers={todayNewCustomers}
+          onClose={() => setShowNewCustomersModal(false)}
+          onViewDetail={handleViewDetail}
+        />
+      )}
     </div>
   );
 }
@@ -1507,10 +1581,10 @@ export default function PlanitAdmin() {
 // 통계 카드
 function StatCard({ icon: Icon, label, value, color }) {
   const colorClasses = {
-    slate: 'from-slate-100 to-slate-50 border-slate-200 text-slate-600',
-    gray: 'from-gray-100 to-gray-50 border-gray-200 text-gray-600',
-    zinc: 'from-zinc-100 to-zinc-50 border-zinc-200 text-zinc-600',
-    stone: 'from-stone-100 to-stone-50 border-stone-200 text-stone-600',
+    rose: 'from-rose-50 to-pink-50 border-rose-200 text-rose-600',
+    sky: 'from-sky-50 to-cyan-50 border-sky-200 text-sky-600',
+    violet: 'from-violet-50 to-purple-50 border-violet-200 text-violet-600',
+    emerald: 'from-emerald-50 to-teal-50 border-emerald-200 text-emerald-600',
   };
 
   return (
@@ -1757,8 +1831,8 @@ function CustomerModal({ customer, userProfile, onSave, onClose }) {
   );
 }
 
-// 고객 상세 모달
-function CustomerDetailModal({ customer, onClose, onUpdate }) {
+// 고객 상세 모달 (노쇼/환불 버튼 추가)
+function CustomerDetailModal({ customer, onClose, onUpdate, onNoShow, onRefund }) {
   const [beforeImage, setBeforeImage] = useState(customer.beforeImage || null);
   const [afterImage, setAfterImage] = useState(customer.afterImage || null);
   const [uploading, setUploading] = useState(false);
@@ -1829,32 +1903,44 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
         <div className="p-6">
           <div className="flex items-start gap-4 mb-6">
             <div className={`w-16 h-16 rounded-2xl flex items-center justify-center text-white text-2xl font-bold ${
+              customer.status === '노쇼' ? 'bg-red-400' :
+              customer.status === '환불' ? 'bg-gray-400' :
               customer.grade === 'VVIP' ? 'bg-gradient-to-br from-amber-400 to-amber-600' :
               customer.grade === 'VIP' ? 'bg-gradient-to-br from-purple-400 to-purple-600' :
               'bg-gradient-to-br from-slate-400 to-gray-400'
             }`}>
-              {customer.grade === 'VVIP' ? <Crown size={28} /> :
+              {customer.status === '노쇼' ? <UserX size={28} /> :
+               customer.status === '환불' ? <RefreshCcw size={28} /> :
+               customer.grade === 'VVIP' ? <Crown size={28} /> :
                customer.grade === 'VIP' ? <Star size={28} /> :
                customer.name?.[0]}
             </div>
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <h3 className="text-xl font-bold text-slate-800">{customer.name}</h3>
-                {customer.grade && customer.grade !== '일반' && (
+                <h3 className={`text-xl font-bold ${customer.status === '노쇼' || customer.status === '환불' ? 'text-slate-400 line-through' : 'text-slate-800'}`}>
+                  {customer.name}
+                </h3>
+                {customer.grade && customer.grade !== '일반' && customer.status !== '노쇼' && customer.status !== '환불' && (
                   <span className={`px-2 py-0.5 rounded text-xs font-bold ${
                     customer.grade === 'VVIP' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
                   }`}>
                     {customer.grade}
                   </span>
                 )}
+                {customer.status === '노쇼' && (
+                  <span className="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">노쇼</span>
+                )}
+                {customer.status === '환불' && (
+                  <span className="px-2 py-0.5 rounded text-xs font-bold bg-gray-200 text-gray-700">환불</span>
+                )}
               </div>
               <p className="text-slate-500">{customer.phone}</p>
               <div className="flex items-center gap-2 mt-2">
                 <span className={`px-2 py-1 rounded-md text-xs font-medium ${
-                  customer.category === '수술' ? 'bg-slate-200 text-slate-700' :
-                  customer.category === '피부시술' ? 'bg-gray-200 text-gray-700' :
-                  customer.category === '상담' ? 'bg-zinc-200 text-zinc-700' :
-                  'bg-stone-200 text-stone-700'
+                  customer.category === '수술' ? 'bg-rose-100 text-rose-700' :
+                  customer.category === '피부시술' ? 'bg-sky-100 text-sky-700' :
+                  customer.category === '상담' ? 'bg-emerald-100 text-emerald-700' :
+                  'bg-violet-100 text-violet-700'
                 }`}>
                   {customer.category}
                 </span>
@@ -1862,7 +1948,9 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
               </div>
             </div>
             <div className="text-right">
-              <p className="text-2xl font-bold text-slate-800">₩{customer.amount?.toLocaleString()}</p>
+              <p className={`text-2xl font-bold ${customer.status === '환불' ? 'text-slate-400 line-through' : 'text-slate-800'}`}>
+                ₩{customer.amount?.toLocaleString()}
+              </p>
               <p className={`text-sm font-medium ${
                 customer.paymentStatus === '완납' ? 'text-emerald-600' :
                 customer.paymentStatus === '예약금' ? 'text-amber-600' :
@@ -1873,6 +1961,26 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
               </p>
             </div>
           </div>
+
+          {/* 노쇼/환불 버튼 */}
+          {customer.status !== '노쇼' && customer.status !== '환불' && (
+            <div className="flex gap-3 mb-6">
+              <button
+                onClick={() => onNoShow(customer.id)}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-red-50 text-red-600 rounded-xl border border-red-200 hover:bg-red-100 transition-colors font-medium"
+              >
+                <UserX size={18} />
+                노쇼 처리
+              </button>
+              <button
+                onClick={() => onRefund(customer.id)}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-gray-50 text-gray-600 rounded-xl border border-gray-200 hover:bg-gray-100 transition-colors font-medium"
+              >
+                <RefreshCcw size={18} />
+                환불 처리
+              </button>
+            </div>
+          )}
 
           <div className="grid grid-cols-4 gap-4 mb-6 p-4 bg-slate-50 rounded-xl">
             <div>
@@ -2186,6 +2294,87 @@ function ProfileModal({ profile, email, onSave, onClose }) {
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// 신규 고객 모달
+function NewCustomersModal({ customers, onClose, onViewDetail }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+      <div className="w-full max-w-lg bg-white rounded-3xl border border-slate-200 shadow-2xl max-h-[80vh] overflow-hidden">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100">
+          <h2 className="text-xl font-semibold text-slate-800 flex items-center gap-2">
+            <UserPlus className="text-emerald-500" size={24} />
+            오늘 신규 고객
+            <span className="ml-2 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-sm">
+              {customers.length}명
+            </span>
+          </h2>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="p-6 max-h-[60vh] overflow-y-auto">
+          {customers.length === 0 ? (
+            <div className="text-center py-8 text-slate-400">
+              <UserPlus className="mx-auto mb-2 opacity-30" size={48} />
+              <p>오늘 등록된 신규 고객이 없습니다.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {customers.map(customer => (
+                <button
+                  key={customer.id}
+                  onClick={() => { onClose(); onViewDetail(customer); }}
+                  className={`w-full flex items-center gap-3 p-4 rounded-xl text-left transition-all hover:scale-[1.01] ${
+                    customer.grade === 'VVIP' ? 'bg-gradient-to-r from-amber-50 to-amber-100/50 border border-amber-200' :
+                    customer.grade === 'VIP' ? 'bg-gradient-to-r from-purple-50 to-purple-100/50 border border-purple-200' :
+                    'bg-slate-50 hover:bg-slate-100 border border-slate-200'
+                  }`}
+                >
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-medium ${
+                    customer.grade === 'VVIP' ? 'bg-amber-500' :
+                    customer.grade === 'VIP' ? 'bg-purple-500' :
+                    'bg-slate-400'
+                  }`}>
+                    {customer.grade === 'VVIP' ? <Crown size={18} /> :
+                     customer.grade === 'VIP' ? <Star size={18} /> :
+                     customer.name?.[0]}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-slate-700">{customer.name}</p>
+                      {customer.grade && customer.grade !== '일반' && (
+                        <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
+                          customer.grade === 'VVIP' ? 'bg-amber-200 text-amber-800' : 'bg-purple-200 text-purple-800'
+                        }`}>
+                          {customer.grade}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-500">{customer.procedure}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-medium text-slate-600">{customer.appointmentTime || '-'}</p>
+                    <p className="text-sm text-slate-400">₩{customer.amount?.toLocaleString()}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="p-6 border-t border-slate-100">
+          <button
+            onClick={onClose}
+            className="w-full px-4 py-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-colors"
+          >
+            닫기
+          </button>
+        </div>
       </div>
     </div>
   );
