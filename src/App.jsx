@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff, Camera, Clock, ChevronLeft, ChevronRight, Image, Megaphone, Check, UserPlus } from 'lucide-react';
+import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff, Camera, Clock, ChevronLeft, ChevronRight, Image, Megaphone, UserPlus, Star, User, Crown } from 'lucide-react';
 
 // Firebase imports
 import { auth, db, storage } from './firebase';
@@ -20,8 +20,8 @@ import {
   query,
   orderBy,
   serverTimestamp,
-  where,
-  Timestamp
+  setDoc,
+  getDoc
 } from 'firebase/firestore';
 import {
   ref,
@@ -65,12 +65,16 @@ const categories = ['수술', '피부시술', '상담', '관리'];
 const visitSources = ['인터넷', '외부 소개', '지인 소개', '기존', '회원권'];
 const paymentMethods = ['카드', '계좌이체', '현금'];
 const paymentStatuses = ['완납', '예약금', '잔금', '환불'];
+const customerGrades = ['일반', 'VIP', 'VVIP'];
+const staffPositions = ['사원', '팀장', '실장', '이사', '원장'];
 
-// 예약 시간 옵션
+// 예약 시간 옵션 (09:00 ~ 22:00)
 const timeSlots = [
   '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
   '12:00', '12:30', '13:00', '13:30', '14:00', '14:30',
-  '15:00', '15:30', '16:00', '16:30', '17:00', '17:30', '18:00'
+  '15:00', '15:30', '16:00', '16:30', '17:00', '17:30',
+  '18:00', '18:30', '19:00', '19:30', '20:00', '20:30',
+  '21:00', '21:30', '22:00'
 ];
 
 // 시술 목록
@@ -274,6 +278,8 @@ function LoginPage() {
 // 메인 앱 컴포넌트
 export default function PlanitAdmin() {
   const [user, setUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+  const [staffList, setStaffList] = useState([]);
   const [authLoading, setAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [customers, setCustomers] = useState([]);
@@ -286,6 +292,7 @@ export default function PlanitAdmin() {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState(null);
   const [editingAnnouncement, setEditingAnnouncement] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
@@ -313,6 +320,41 @@ export default function PlanitAdmin() {
     });
     return () => unsubscribe();
   }, []);
+
+  // 사용자 프로필 로드
+  useEffect(() => {
+    if (!user) return;
+
+    const loadProfile = async () => {
+      try {
+        const profileRef = doc(db, 'profiles', user.uid);
+        const profileSnap = await getDoc(profileRef);
+        if (profileSnap.exists()) {
+          setUserProfile(profileSnap.data());
+        }
+      } catch (error) {
+        console.error('Error loading profile:', error);
+      }
+    };
+
+    loadProfile();
+  }, [user]);
+
+  // 직원 목록 구독
+  useEffect(() => {
+    if (!user) return;
+
+    const profilesRef = collection(db, 'profiles');
+    const unsubscribe = onSnapshot(profilesRef, (snapshot) => {
+      const profiles = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setStaffList(profiles);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
 
   // 고객 데이터 구독
   useEffect(() => {
@@ -373,6 +415,23 @@ export default function PlanitAdmin() {
     return () => unsubscribe();
   }, [user]);
 
+  // 프로필 저장
+  const handleSaveProfile = async (profileData) => {
+    try {
+      const profileRef = doc(db, 'profiles', user.uid);
+      await setDoc(profileRef, {
+        ...profileData,
+        email: user.email,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      setUserProfile(profileData);
+      setShowProfileModal(false);
+    } catch (error) {
+      console.error('Error saving profile:', error);
+      alert('프로필 저장에 실패했습니다.');
+    }
+  };
+
   // 고객 추가
   const handleAddCustomer = async (customerData) => {
     try {
@@ -382,13 +441,13 @@ export default function PlanitAdmin() {
         createdBy: user.email
       });
 
-      // 새 고객 알림 생성
       await addDoc(collection(db, 'notifications'), {
         type: 'new_customer',
         title: '새 고객 등록',
         message: `${customerData.name}님이 등록되었습니다. (${customerData.procedure})`,
         customerId: docRef.id,
         customerName: customerData.name,
+        customerGrade: customerData.grade,
         read: {},
         createdAt: serverTimestamp(),
         createdBy: user.email
@@ -447,7 +506,6 @@ export default function PlanitAdmin() {
         createdBy: user.email
       });
 
-      // 공지사항 알림 생성
       await addDoc(collection(db, 'notifications'), {
         type: 'announcement',
         title: '새 공지사항',
@@ -514,7 +572,6 @@ export default function PlanitAdmin() {
     }
   };
 
-  // 모든 알림 읽음 처리
   const markAllNotificationsAsRead = async () => {
     try {
       const unreadNotifications = notifications.filter(n => !n.read?.[user.uid]);
@@ -526,7 +583,6 @@ export default function PlanitAdmin() {
     }
   };
 
-  // 읽지 않은 알림 수
   const unreadCount = notifications.filter(n => !n.read?.[user.uid]).length;
 
   const handleLogout = async () => {
@@ -550,9 +606,9 @@ export default function PlanitAdmin() {
   });
 
   const exportCSV = () => {
-    const headers = ['이름', '연락처', '대분류', '시술명', '내원경로', '결제수단', '납부상태', '금액', '날짜', '예약시간', '메모'];
+    const headers = ['이름', '연락처', '등급', '대분류', '시술명', '담당자', '내원경로', '결제수단', '납부상태', '금액', '날짜', '예약시간', '메모'];
     const rows = filteredCustomers.map(c => [
-      c.name, c.phone, c.category, c.procedure, c.visitSource, c.paymentMethod, c.paymentStatus, c.amount, c.date, c.appointmentTime || '', c.memo
+      c.name, c.phone, c.grade || '일반', c.category, c.procedure, c.staffName || '', c.visitSource, c.paymentMethod, c.paymentStatus, c.amount, c.date, c.appointmentTime || '', c.memo
     ]);
     const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -567,6 +623,15 @@ export default function PlanitAdmin() {
     return customers
       .filter(c => c.date === date && c.appointmentTime)
       .sort((a, b) => a.appointmentTime.localeCompare(b.appointmentTime));
+  };
+
+  // 오늘 VIP/VVIP 예약 고객
+  const getTodayVIPCustomers = () => {
+    const today = new Date().toISOString().split('T')[0];
+    return customers.filter(c => 
+      c.date === today && 
+      (c.grade === 'VIP' || c.grade === 'VVIP')
+    ).sort((a, b) => (a.appointmentTime || '').localeCompare(b.appointmentTime || ''));
   };
 
   if (authLoading) {
@@ -588,7 +653,7 @@ export default function PlanitAdmin() {
   const categoryRevenue = getCategoryRevenue(customers);
   const dailyRevenue = getDailyRevenue(customers);
   const sourceStats = getSourceStats(customers);
-  const todayAppointments = getAppointmentsForDate(selectedDate);
+  const todayVIPCustomers = getTodayVIPCustomers();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-zinc-100 text-slate-800 flex">
@@ -634,7 +699,10 @@ export default function PlanitAdmin() {
         <div className="p-4 border-t border-slate-100 space-y-2">
           {sidebarOpen && (
             <div className="px-4 py-2 text-sm text-slate-500 truncate">
-              {user.email}
+              {userProfile?.name || user.email}
+              {userProfile?.position && (
+                <span className="ml-1 text-xs text-slate-400">({userProfile.position})</span>
+              )}
             </div>
           )}
           <button
@@ -713,13 +781,24 @@ export default function PlanitAdmin() {
                             <div className="flex items-start gap-3">
                               <div className={`p-2 rounded-lg ${
                                 notification.type === 'new_customer' 
-                                  ? 'bg-emerald-100 text-emerald-600'
-                                  : 'bg-amber-100 text-amber-600'
+                                  ? notification.customerGrade === 'VVIP' ? 'bg-amber-100 text-amber-600'
+                                  : notification.customerGrade === 'VIP' ? 'bg-purple-100 text-purple-600'
+                                  : 'bg-emerald-100 text-emerald-600'
+                                  : 'bg-blue-100 text-blue-600'
                               }`}>
                                 {notification.type === 'new_customer' ? <UserPlus size={16} /> : <Megaphone size={16} />}
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="font-medium text-slate-700 text-sm">{notification.title}</p>
+                                <div className="flex items-center gap-2">
+                                  <p className="font-medium text-slate-700 text-sm">{notification.title}</p>
+                                  {notification.customerGrade && notification.customerGrade !== '일반' && (
+                                    <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
+                                      notification.customerGrade === 'VVIP' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
+                                    }`}>
+                                      {notification.customerGrade}
+                                    </span>
+                                  )}
+                                </div>
                                 <p className="text-slate-500 text-sm truncate">{notification.message}</p>
                                 <p className="text-slate-400 text-xs mt-1">{formatTimeAgo(notification.createdAt)}</p>
                               </div>
@@ -734,9 +813,14 @@ export default function PlanitAdmin() {
                   </div>
                 )}
               </div>
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-slate-600 to-gray-600 flex items-center justify-center font-medium text-white shadow-md">
-                {user.email?.[0]?.toUpperCase() || 'U'}
-              </div>
+
+              {/* 프로필 버튼 */}
+              <button
+                onClick={() => setShowProfileModal(true)}
+                className="w-10 h-10 rounded-xl bg-gradient-to-br from-slate-600 to-gray-600 flex items-center justify-center font-medium text-white shadow-md hover:from-slate-700 hover:to-gray-700 transition-all"
+              >
+                {userProfile?.name?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase() || 'U'}
+              </button>
             </div>
           </div>
         </header>
@@ -797,9 +881,8 @@ export default function PlanitAdmin() {
                     ))}
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     <StatCard icon={TrendingUp} label="총 매출" value={`₩${stats.totalRevenue.toLocaleString()}`} color="slate" />
-                    <StatCard icon={CreditCard} label="순 매출" value={`₩${stats.netRevenue.toLocaleString()}`} color="gray" />
                     <StatCard icon={Users} label="내원 고객" value={`${stats.customerCount}명`} color="zinc" />
                     <StatCard icon={Calendar} label="오늘 예약" value={`${getAppointmentsForDate(new Date().toISOString().split('T')[0]).length}건`} color="stone" />
                   </div>
@@ -821,28 +904,51 @@ export default function PlanitAdmin() {
                       </ResponsiveContainer>
                     </div>
 
-                    <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
-                      <h3 className="text-lg font-semibold mb-6 text-slate-700">오늘의 예약</h3>
+                    {/* VIP/VVIP 고객 예약 */}
+                    <div className="bg-gradient-to-br from-amber-50 to-purple-50 backdrop-blur-sm rounded-2xl border border-amber-200 p-6 shadow-lg">
+                      <h3 className="text-lg font-semibold mb-6 text-slate-700 flex items-center gap-2">
+                        <Crown className="text-amber-500" size={20} />
+                        오늘의 VIP 고객
+                      </h3>
                       <div className="space-y-2 max-h-[280px] overflow-y-auto">
-                        {getAppointmentsForDate(new Date().toISOString().split('T')[0]).map(apt => (
-                          <div key={apt.id} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
-                            <div className="w-16 text-center font-medium text-slate-600">{apt.appointmentTime}</div>
-                            <div className="flex-1">
-                              <p className="font-medium text-slate-700">{apt.name}</p>
-                              <p className="text-sm text-slate-500">{apt.procedure}</p>
+                        {todayVIPCustomers.length > 0 ? (
+                          todayVIPCustomers.map(customer => (
+                            <div 
+                              key={customer.id} 
+                              className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer hover:scale-[1.02] transition-all ${
+                                customer.grade === 'VVIP' 
+                                  ? 'bg-gradient-to-r from-amber-100 to-amber-50 border border-amber-200' 
+                                  : 'bg-gradient-to-r from-purple-100 to-purple-50 border border-purple-200'
+                              }`}
+                              onClick={() => handleViewDetail(customer)}
+                            >
+                              <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold ${
+                                customer.grade === 'VVIP' ? 'bg-amber-500' : 'bg-purple-500'
+                              }`}>
+                                {customer.grade === 'VVIP' ? <Crown size={18} /> : <Star size={18} />}
+                              </div>
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                  <p className="font-semibold text-slate-700">{customer.name}</p>
+                                  <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
+                                    customer.grade === 'VVIP' ? 'bg-amber-200 text-amber-800' : 'bg-purple-200 text-purple-800'
+                                  }`}>
+                                    {customer.grade}
+                                  </span>
+                                </div>
+                                <p className="text-sm text-slate-500">{customer.procedure}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-medium text-slate-600">{customer.appointmentTime || '-'}</p>
+                                <p className="text-xs text-slate-400">{customer.staffName || '-'}</p>
+                              </div>
                             </div>
-                            <span className={`px-2 py-1 rounded-md text-xs font-medium ${
-                              apt.category === '수술' ? 'bg-slate-200 text-slate-700' :
-                              apt.category === '피부시술' ? 'bg-gray-200 text-gray-700' :
-                              apt.category === '상담' ? 'bg-zinc-200 text-zinc-700' :
-                              'bg-stone-200 text-stone-700'
-                            }`}>
-                              {apt.category}
-                            </span>
+                          ))
+                        ) : (
+                          <div className="text-center py-8 text-slate-400">
+                            <Crown className="mx-auto mb-2 opacity-30" size={32} />
+                            <p>오늘 VIP 예약이 없습니다</p>
                           </div>
-                        ))}
-                        {getAppointmentsForDate(new Date().toISOString().split('T')[0]).length === 0 && (
-                          <p className="text-center text-slate-400 py-8">오늘 예약이 없습니다.</p>
                         )}
                       </div>
                     </div>
@@ -951,13 +1057,13 @@ export default function PlanitAdmin() {
                         <thead>
                           <tr className="border-b border-slate-100 bg-slate-50/50">
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">고객명</th>
+                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">등급</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">연락처</th>
-                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">대분류</th>
-                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">시술명</th>
-                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">예약시간</th>
-                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">납부상태</th>
+                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">시술</th>
+                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">담당</th>
+                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">예약</th>
+                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">납부</th>
                             <th className="text-right px-6 py-4 text-sm font-medium text-slate-500">금액</th>
-                            <th className="text-center px-6 py-4 text-sm font-medium text-slate-500">날짜</th>
                             <th className="text-center px-6 py-4 text-sm font-medium text-slate-500">관리</th>
                           </tr>
                         </thead>
@@ -969,11 +1075,26 @@ export default function PlanitAdmin() {
                                   onClick={() => handleViewDetail(customer)}
                                   className="flex items-center gap-3 hover:text-slate-900"
                                 >
-                                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-400 to-gray-400 flex items-center justify-center text-white text-sm font-medium">
-                                    {customer.name?.[0]}
+                                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium ${
+                                    customer.grade === 'VVIP' ? 'bg-amber-500' :
+                                    customer.grade === 'VIP' ? 'bg-purple-500' :
+                                    'bg-gradient-to-br from-slate-400 to-gray-400'
+                                  }`}>
+                                    {customer.grade === 'VVIP' ? <Crown size={14} /> :
+                                     customer.grade === 'VIP' ? <Star size={14} /> :
+                                     customer.name?.[0]}
                                   </div>
                                   <span className="font-medium text-slate-700 hover:underline">{customer.name}</span>
                                 </button>
+                              </td>
+                              <td className="px-6 py-4">
+                                {customer.grade && customer.grade !== '일반' && (
+                                  <span className={`px-2 py-1 rounded-md text-xs font-bold ${
+                                    customer.grade === 'VVIP' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
+                                  }`}>
+                                    {customer.grade}
+                                  </span>
+                                )}
                               </td>
                               <td className="px-6 py-4 text-slate-600">{customer.phone}</td>
                               <td className="px-6 py-4">
@@ -983,16 +1104,18 @@ export default function PlanitAdmin() {
                                   customer.category === '상담' ? 'bg-zinc-200 text-zinc-700' :
                                   'bg-stone-200 text-stone-700'
                                 }`}>
-                                  {customer.category}
+                                  {customer.procedure}
                                 </span>
                               </td>
-                              <td className="px-6 py-4 text-slate-600">{customer.procedure}</td>
-                              <td className="px-6 py-4 text-slate-600">
+                              <td className="px-6 py-4 text-slate-600 text-sm">
+                                {customer.staffName && (
+                                  <span>{customer.staffName} {customer.staffPosition && <span className="text-slate-400">({customer.staffPosition})</span>}</span>
+                                )}
+                              </td>
+                              <td className="px-6 py-4 text-slate-600 text-sm">
+                                <div>{customer.date}</div>
                                 {customer.appointmentTime && (
-                                  <span className="flex items-center gap-1">
-                                    <Clock size={14} />
-                                    {customer.appointmentTime}
-                                  </span>
+                                  <div className="text-slate-400">{customer.appointmentTime}</div>
                                 )}
                               </td>
                               <td className="px-6 py-4">
@@ -1010,7 +1133,6 @@ export default function PlanitAdmin() {
                               <td className="px-6 py-4 text-right font-medium text-slate-700">
                                 {customer.amount !== 0 ? `₩${customer.amount?.toLocaleString()}` : '-'}
                               </td>
-                              <td className="px-6 py-4 text-center text-slate-500">{customer.date}</td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center justify-center gap-2">
                                   <button
@@ -1094,32 +1216,36 @@ export default function PlanitAdmin() {
                     <div className="p-4 border-b border-slate-100 bg-slate-50/50">
                       <h3 className="font-semibold text-slate-700">예약 타임테이블</h3>
                     </div>
-                    <div className="divide-y divide-slate-100">
+                    <div className="divide-y divide-slate-100 max-h-[600px] overflow-y-auto">
                       {timeSlots.map(time => {
                         const appointments = customers.filter(
                           c => c.date === selectedDate && c.appointmentTime === time
                         );
                         return (
                           <div key={time} className="flex">
-                            <div className="w-20 px-4 py-3 bg-slate-50/50 text-sm font-medium text-slate-600 border-r border-slate-100">
+                            <div className="w-20 px-4 py-3 bg-slate-50/50 text-sm font-medium text-slate-600 border-r border-slate-100 sticky left-0">
                               {time}
                             </div>
-                            <div className="flex-1 px-4 py-2 min-h-[60px]">
+                            <div className="flex-1 px-4 py-2 min-h-[50px]">
                               {appointments.length > 0 ? (
                                 <div className="flex flex-wrap gap-2">
                                   {appointments.map(apt => (
                                     <button
                                       key={apt.id}
                                       onClick={() => handleViewDetail(apt)}
-                                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-all hover:scale-105 ${
+                                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-all hover:scale-105 flex items-center gap-2 ${
+                                        apt.grade === 'VVIP' ? 'bg-amber-100 text-amber-700 border border-amber-300' :
+                                        apt.grade === 'VIP' ? 'bg-purple-100 text-purple-700 border border-purple-300' :
                                         apt.category === '수술' ? 'bg-red-100 text-red-700 border border-red-200' :
-                                        apt.category === '피부시술' ? 'bg-purple-100 text-purple-700 border border-purple-200' :
-                                        apt.category === '상담' ? 'bg-blue-100 text-blue-700 border border-blue-200' :
-                                        'bg-green-100 text-green-700 border border-green-200'
+                                        apt.category === '피부시술' ? 'bg-blue-100 text-blue-700 border border-blue-200' :
+                                        apt.category === '상담' ? 'bg-green-100 text-green-700 border border-green-200' :
+                                        'bg-gray-100 text-gray-700 border border-gray-200'
                                       }`}
                                     >
+                                      {apt.grade === 'VVIP' && <Crown size={14} />}
+                                      {apt.grade === 'VIP' && <Star size={14} />}
                                       <span className="font-semibold">{apt.name}</span>
-                                      <span className="ml-2 opacity-75">{apt.procedure}</span>
+                                      <span className="opacity-75">{apt.procedure}</span>
                                     </button>
                                   ))}
                                 </div>
@@ -1133,12 +1259,14 @@ export default function PlanitAdmin() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-4 flex-wrap">
                     <span className="text-sm text-slate-500">범례:</span>
+                    <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs flex items-center gap-1"><Crown size={12} /> VVIP</span>
+                    <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs flex items-center gap-1"><Star size={12} /> VIP</span>
                     <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">수술</span>
-                    <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs">피부시술</span>
-                    <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">상담</span>
-                    <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">관리</span>
+                    <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">피부시술</span>
+                    <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">상담</span>
+                    <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">관리</span>
                   </div>
                 </div>
               )}
@@ -1263,6 +1391,7 @@ export default function PlanitAdmin() {
       {showModal && (
         <CustomerModal
           customer={editingCustomer}
+          staffList={staffList}
           onSave={handleSaveCustomer}
           onClose={() => { setShowModal(false); setEditingCustomer(null); }}
         />
@@ -1283,6 +1412,16 @@ export default function PlanitAdmin() {
           announcement={editingAnnouncement}
           onSave={handleSaveAnnouncement}
           onClose={() => { setShowAnnouncementModal(false); setEditingAnnouncement(null); }}
+        />
+      )}
+
+      {/* 프로필 모달 */}
+      {showProfileModal && (
+        <ProfileModal
+          profile={userProfile}
+          email={user.email}
+          onSave={handleSaveProfile}
+          onClose={() => setShowProfileModal(false)}
         />
       )}
     </div>
@@ -1312,12 +1451,16 @@ function StatCard({ icon: Icon, label, value, color }) {
 }
 
 // 고객 모달
-function CustomerModal({ customer, onSave, onClose }) {
+function CustomerModal({ customer, staffList, onSave, onClose }) {
   const [form, setForm] = useState(customer || {
     name: '',
     phone: '',
+    grade: '일반',
     category: '수술',
     procedure: '',
+    staffId: '',
+    staffName: '',
+    staffPosition: '',
     visitSource: '인터넷',
     paymentMethod: '카드',
     paymentStatus: '완납',
@@ -1330,6 +1473,28 @@ function CustomerModal({ customer, onSave, onClose }) {
   const handlePhoneChange = (e) => {
     const formatted = formatPhoneNumber(e.target.value);
     setForm({ ...form, phone: formatted });
+  };
+
+  const handleStaffChange = (e) => {
+    const staffId = e.target.value;
+    if (staffId) {
+      const staff = staffList.find(s => s.id === staffId);
+      if (staff) {
+        setForm({
+          ...form,
+          staffId: staff.id,
+          staffName: staff.name,
+          staffPosition: staff.position
+        });
+      }
+    } else {
+      setForm({
+        ...form,
+        staffId: '',
+        staffName: '',
+        staffPosition: ''
+      });
+    }
   };
 
   const handleSubmit = (e) => {
@@ -1362,6 +1527,23 @@ function CustomerModal({ customer, onSave, onClose }) {
               />
             </div>
             <div>
+              <label className="block text-sm font-medium text-slate-600 mb-2">고객 등급</label>
+              <select
+                value={form.grade}
+                onChange={(e) => setForm({ ...form, grade: e.target.value })}
+                className={`w-full px-4 py-2.5 border rounded-xl focus:outline-none ${
+                  form.grade === 'VVIP' ? 'bg-amber-50 border-amber-300 text-amber-700' :
+                  form.grade === 'VIP' ? 'bg-purple-50 border-purple-300 text-purple-700' :
+                  'bg-slate-50/50 border-slate-200 text-slate-800'
+                }`}
+              >
+                {customerGrades.map(grade => <option key={grade} value={grade}>{grade}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
               <label className="block text-sm font-medium text-slate-600 mb-2">연락처 *</label>
               <input
                 type="tel"
@@ -1371,6 +1553,21 @@ function CustomerModal({ customer, onSave, onClose }) {
                 placeholder="010-0000-0000"
                 className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
               />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-600 mb-2">담당자</label>
+              <select
+                value={form.staffId}
+                onChange={handleStaffChange}
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
+              >
+                <option value="">선택하세요</option>
+                {staffList.map(staff => (
+                  <option key={staff.id} value={staff.id}>
+                    {staff.name} ({staff.position})
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -1572,11 +1769,26 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
 
         <div className="p-6">
           <div className="flex items-start gap-4 mb-6">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-slate-400 to-gray-400 flex items-center justify-center text-white text-2xl font-bold">
-              {customer.name?.[0]}
+            <div className={`w-16 h-16 rounded-2xl flex items-center justify-center text-white text-2xl font-bold ${
+              customer.grade === 'VVIP' ? 'bg-gradient-to-br from-amber-400 to-amber-600' :
+              customer.grade === 'VIP' ? 'bg-gradient-to-br from-purple-400 to-purple-600' :
+              'bg-gradient-to-br from-slate-400 to-gray-400'
+            }`}>
+              {customer.grade === 'VVIP' ? <Crown size={28} /> :
+               customer.grade === 'VIP' ? <Star size={28} /> :
+               customer.name?.[0]}
             </div>
             <div className="flex-1">
-              <h3 className="text-xl font-bold text-slate-800">{customer.name}</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-xl font-bold text-slate-800">{customer.name}</h3>
+                {customer.grade && customer.grade !== '일반' && (
+                  <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                    customer.grade === 'VVIP' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'
+                  }`}>
+                    {customer.grade}
+                  </span>
+                )}
+              </div>
               <p className="text-slate-500">{customer.phone}</p>
               <div className="flex items-center gap-2 mt-2">
                 <span className={`px-2 py-1 rounded-md text-xs font-medium ${
@@ -1603,7 +1815,7 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4 mb-6 p-4 bg-slate-50 rounded-xl">
+          <div className="grid grid-cols-4 gap-4 mb-6 p-4 bg-slate-50 rounded-xl">
             <div>
               <p className="text-sm text-slate-500">예약일</p>
               <p className="font-medium text-slate-700">{customer.date}</p>
@@ -1611,6 +1823,12 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
             <div>
               <p className="text-sm text-slate-500">예약시간</p>
               <p className="font-medium text-slate-700">{customer.appointmentTime || '-'}</p>
+            </div>
+            <div>
+              <p className="text-sm text-slate-500">담당자</p>
+              <p className="font-medium text-slate-700">
+                {customer.staffName ? `${customer.staffName} (${customer.staffPosition})` : '-'}
+              </p>
             </div>
             <div>
               <p className="text-sm text-slate-500">내원경로</p>
@@ -1819,6 +2037,93 @@ function AnnouncementModal({ announcement, onSave, onClose }) {
               className="flex-1 px-4 py-3 bg-gradient-to-r from-slate-600 to-gray-600 text-white rounded-xl hover:from-slate-700 hover:to-gray-700 transition-all font-medium shadow-lg"
             >
               {announcement ? '수정하기' : '등록하기'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// 프로필 모달
+function ProfileModal({ profile, email, onSave, onClose }) {
+  const [form, setForm] = useState({
+    name: profile?.name || '',
+    position: profile?.position || '사원'
+  });
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!form.name.trim()) {
+      alert('이름을 입력해주세요.');
+      return;
+    }
+    onSave(form);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+      <div className="w-full max-w-md bg-white rounded-3xl border border-slate-200 shadow-2xl">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100">
+          <h2 className="text-xl font-semibold text-slate-800">프로필 설정</h2>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div className="flex justify-center mb-4">
+            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-slate-600 to-gray-600 flex items-center justify-center text-white text-3xl font-bold">
+              {form.name?.[0]?.toUpperCase() || email?.[0]?.toUpperCase() || 'U'}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-600 mb-2">이메일</label>
+            <input
+              type="email"
+              value={email}
+              disabled
+              className="w-full px-4 py-2.5 bg-slate-100 border border-slate-200 rounded-xl text-slate-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-600 mb-2">이름 *</label>
+            <input
+              type="text"
+              required
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="이름을 입력하세요"
+              className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-600 mb-2">직급</label>
+            <select
+              value={form.position}
+              onChange={(e) => setForm({ ...form, position: e.target.value })}
+              className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
+            >
+              {staffPositions.map(pos => <option key={pos} value={pos}>{pos}</option>)}
+            </select>
+          </div>
+
+          <div className="flex gap-3 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 px-4 py-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-colors"
+            >
+              취소
+            </button>
+            <button
+              type="submit"
+              className="flex-1 px-4 py-3 bg-gradient-to-r from-slate-600 to-gray-600 text-white rounded-xl hover:from-slate-700 hover:to-gray-700 transition-all font-medium shadow-lg"
+            >
+              저장하기
             </button>
           </div>
         </form>
