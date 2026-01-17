@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff, Camera, Clock, ChevronLeft, ChevronRight, Image } from 'lucide-react';
+import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff, Camera, Clock, ChevronLeft, ChevronRight, Image, Megaphone, Check, UserPlus } from 'lucide-react';
 
 // Firebase imports
 import { auth, db, storage } from './firebase';
@@ -20,13 +20,13 @@ import {
   query,
   orderBy,
   serverTimestamp,
-  getDoc
+  where,
+  Timestamp
 } from 'firebase/firestore';
 import {
   ref,
   uploadBytes,
-  getDownloadURL,
-  deleteObject
+  getDownloadURL
 } from 'firebase/storage';
 
 // 전화번호 포맷팅 함수
@@ -43,6 +43,23 @@ const formatPhoneNumber = (value) => {
   }
 };
 
+// 시간 포맷팅
+const formatTimeAgo = (timestamp) => {
+  if (!timestamp) return '';
+  const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  const now = new Date();
+  const diff = now - date;
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  
+  if (minutes < 1) return '방금 전';
+  if (minutes < 60) return `${minutes}분 전`;
+  if (hours < 24) return `${hours}시간 전`;
+  if (days < 7) return `${days}일 전`;
+  return date.toLocaleDateString('ko-KR');
+};
+
 // 카테고리 옵션
 const categories = ['수술', '피부시술', '상담', '관리'];
 const visitSources = ['인터넷', '외부 소개', '지인 소개', '기존', '회원권'];
@@ -56,7 +73,7 @@ const timeSlots = [
   '15:00', '15:30', '16:00', '16:30', '17:00', '17:30', '18:00'
 ];
 
-// 시술 목록 (카테고리별)
+// 시술 목록
 const proceduresByCategory = {
   '수술': ['눈매교정', '코성형', '안면윤곽', '지방흡입', '가슴성형', '눈밑지방재배치', '이마거상', '안면거상'],
   '피부시술': ['보톡스', '필러', '레이저토닝', '울쎄라', '써마지', '스킨부스터', 'PRP', '물광주사'],
@@ -91,16 +108,9 @@ const calculateStats = (customers, period = 'day') => {
   const customerCount = filtered.filter(c => c.paymentStatus !== '환불').length;
   const consultCount = filtered.filter(c => c.category === '상담' && c.paymentStatus !== '환불').length;
   
-  return { 
-    totalRevenue, 
-    totalRefund, 
-    customerCount, 
-    consultCount, 
-    netRevenue: totalRevenue - totalRefund 
-  };
+  return { totalRevenue, totalRefund, customerCount, consultCount, netRevenue: totalRevenue - totalRefund };
 };
 
-// 카테고리별 매출 계산
 const getCategoryRevenue = (customers) => {
   const categoryData = {};
   categories.forEach(cat => {
@@ -113,7 +123,6 @@ const getCategoryRevenue = (customers) => {
     .map(([name, value]) => ({ name, value }));
 };
 
-// 일별 매출 데이터
 const getDailyRevenue = (customers) => {
   const data = [];
   for (let i = 6; i >= 0; i--) {
@@ -131,7 +140,6 @@ const getDailyRevenue = (customers) => {
   return data;
 };
 
-// 내원경로별 통계
 const getSourceStats = (customers) => {
   const sourceData = {};
   visitSources.forEach(source => {
@@ -269,17 +277,34 @@ export default function PlanitAdmin() {
   const [authLoading, setAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [customers, setCustomers] = useState([]);
+  const [announcements, setAnnouncements] = useState([]);
+  const [notifications, setNotifications] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [showAnnouncementModal, setShowAnnouncementModal] = useState(false);
+  const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState(null);
+  const [editingAnnouncement, setEditingAnnouncement] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [statsPeriod, setStatsPeriod] = useState('month');
   const [dataLoading, setDataLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const notificationRef = useRef(null);
+
+  // 클릭 외부 감지
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (notificationRef.current && !notificationRef.current.contains(event.target)) {
+        setShowNotificationPanel(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -289,6 +314,7 @@ export default function PlanitAdmin() {
     return () => unsubscribe();
   }, []);
 
+  // 고객 데이터 구독
   useEffect(() => {
     if (!user) return;
 
@@ -311,13 +337,63 @@ export default function PlanitAdmin() {
     return () => unsubscribe();
   }, [user]);
 
+  // 공지사항 구독
+  useEffect(() => {
+    if (!user) return;
+
+    const announcementsRef = collection(db, 'announcements');
+    const q = query(announcementsRef, orderBy('createdAt', 'desc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const announcementsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setAnnouncements(announcementsData);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // 알림 구독
+  useEffect(() => {
+    if (!user) return;
+
+    const notificationsRef = collection(db, 'notifications');
+    const q = query(notificationsRef, orderBy('createdAt', 'desc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const notificationsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setNotifications(notificationsData);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // 고객 추가
   const handleAddCustomer = async (customerData) => {
     try {
-      await addDoc(collection(db, 'customers'), {
+      const docRef = await addDoc(collection(db, 'customers'), {
         ...customerData,
         createdAt: serverTimestamp(),
         createdBy: user.email
       });
+
+      // 새 고객 알림 생성
+      await addDoc(collection(db, 'notifications'), {
+        type: 'new_customer',
+        title: '새 고객 등록',
+        message: `${customerData.name}님이 등록되었습니다. (${customerData.procedure})`,
+        customerId: docRef.id,
+        customerName: customerData.name,
+        read: {},
+        createdAt: serverTimestamp(),
+        createdBy: user.email
+      });
+
       setShowModal(false);
     } catch (error) {
       console.error('Error adding customer:', error);
@@ -325,6 +401,7 @@ export default function PlanitAdmin() {
     }
   };
 
+  // 고객 수정
   const handleUpdateCustomer = async (customerData) => {
     try {
       const customerRef = doc(db, 'customers', customerData.id);
@@ -360,6 +437,98 @@ export default function PlanitAdmin() {
     }
   };
 
+  // 공지사항 추가
+  const handleAddAnnouncement = async (announcementData) => {
+    try {
+      await addDoc(collection(db, 'announcements'), {
+        ...announcementData,
+        read: {},
+        createdAt: serverTimestamp(),
+        createdBy: user.email
+      });
+
+      // 공지사항 알림 생성
+      await addDoc(collection(db, 'notifications'), {
+        type: 'announcement',
+        title: '새 공지사항',
+        message: announcementData.title,
+        read: {},
+        createdAt: serverTimestamp(),
+        createdBy: user.email
+      });
+
+      setShowAnnouncementModal(false);
+    } catch (error) {
+      console.error('Error adding announcement:', error);
+      alert('공지사항 등록에 실패했습니다.');
+    }
+  };
+
+  // 공지사항 수정
+  const handleUpdateAnnouncement = async (announcementData) => {
+    try {
+      const announcementRef = doc(db, 'announcements', announcementData.id);
+      await updateDoc(announcementRef, {
+        title: announcementData.title,
+        content: announcementData.content,
+        important: announcementData.important,
+        updatedAt: serverTimestamp(),
+        updatedBy: user.email
+      });
+      setShowAnnouncementModal(false);
+      setEditingAnnouncement(null);
+    } catch (error) {
+      console.error('Error updating announcement:', error);
+      alert('공지사항 수정에 실패했습니다.');
+    }
+  };
+
+  const handleSaveAnnouncement = (announcementData) => {
+    if (announcementData.id) {
+      handleUpdateAnnouncement(announcementData);
+    } else {
+      handleAddAnnouncement(announcementData);
+    }
+  };
+
+  const handleDeleteAnnouncement = async (id) => {
+    if (confirm('정말 삭제하시겠습니까?')) {
+      try {
+        await deleteDoc(doc(db, 'announcements', id));
+      } catch (error) {
+        console.error('Error deleting announcement:', error);
+        alert('공지사항 삭제에 실패했습니다.');
+      }
+    }
+  };
+
+  // 알림 읽음 처리
+  const markNotificationAsRead = async (notificationId) => {
+    try {
+      const notificationRef = doc(db, 'notifications', notificationId);
+      await updateDoc(notificationRef, {
+        [`read.${user.uid}`]: true
+      });
+    } catch (error) {
+      console.error('Error marking notification as read:', error);
+    }
+  };
+
+  // 모든 알림 읽음 처리
+  const markAllNotificationsAsRead = async () => {
+    try {
+      const unreadNotifications = notifications.filter(n => !n.read?.[user.uid]);
+      for (const notification of unreadNotifications) {
+        await markNotificationAsRead(notification.id);
+      }
+    } catch (error) {
+      console.error('Error marking all notifications as read:', error);
+    }
+  };
+
+  // 읽지 않은 알림 수
+  const unreadCount = notifications.filter(n => !n.read?.[user.uid]).length;
+
   const handleLogout = async () => {
     try {
       await signOut(auth);
@@ -394,7 +563,6 @@ export default function PlanitAdmin() {
     a.click();
   };
 
-  // 선택된 날짜의 예약 목록
   const getAppointmentsForDate = (date) => {
     return customers
       .filter(c => c.date === date && c.appointmentTime)
@@ -440,6 +608,7 @@ export default function PlanitAdmin() {
             { id: 'dashboard', icon: Home, label: '대시보드' },
             { id: 'customers', icon: Users, label: '고객 관리' },
             { id: 'schedule', icon: Calendar, label: '예약 스케줄' },
+            { id: 'announcements', icon: Megaphone, label: '공지사항' },
             { id: 'records', icon: FileText, label: '시술 기록' },
           ].map(item => (
             <button
@@ -453,6 +622,11 @@ export default function PlanitAdmin() {
             >
               <item.icon size={20} />
               {sidebarOpen && <span>{item.label}</span>}
+              {item.id === 'announcements' && announcements.filter(a => !a.read?.[user.uid]).length > 0 && (
+                <span className="ml-auto w-5 h-5 bg-red-500 rounded-full text-white text-xs flex items-center justify-center">
+                  {announcements.filter(a => !a.read?.[user.uid]).length}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -488,19 +662,78 @@ export default function PlanitAdmin() {
                 {activeTab === 'dashboard' && '대시보드'}
                 {activeTab === 'customers' && '고객 관리'}
                 {activeTab === 'schedule' && '예약 스케줄'}
+                {activeTab === 'announcements' && '공지사항'}
                 {activeTab === 'records' && '시술 기록'}
               </h1>
               <p className="text-slate-400 text-sm mt-1">{new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p>
             </div>
             <div className="flex items-center gap-4">
-              <button className="p-2 rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors relative">
-                <Bell size={20} />
-                {todayAppointments.length > 0 && (
-                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full text-white text-xs flex items-center justify-center">
-                    {todayAppointments.length}
-                  </span>
+              {/* 알림 버튼 */}
+              <div className="relative" ref={notificationRef}>
+                <button 
+                  onClick={() => setShowNotificationPanel(!showNotificationPanel)}
+                  className="p-2 rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors relative"
+                >
+                  <Bell size={20} />
+                  {unreadCount > 0 && (
+                    <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full text-white text-xs flex items-center justify-center">
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </span>
+                  )}
+                </button>
+
+                {/* 알림 패널 */}
+                {showNotificationPanel && (
+                  <div className="absolute right-0 mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50">
+                    <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                      <h3 className="font-semibold text-slate-800">알림</h3>
+                      {unreadCount > 0 && (
+                        <button
+                          onClick={markAllNotificationsAsRead}
+                          className="text-sm text-slate-500 hover:text-slate-700"
+                        >
+                          모두 읽음
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-96 overflow-y-auto">
+                      {notifications.length === 0 ? (
+                        <div className="p-8 text-center text-slate-400">
+                          알림이 없습니다
+                        </div>
+                      ) : (
+                        notifications.slice(0, 20).map(notification => (
+                          <div
+                            key={notification.id}
+                            onClick={() => markNotificationAsRead(notification.id)}
+                            className={`p-4 border-b border-slate-50 hover:bg-slate-50 cursor-pointer transition-colors ${
+                              !notification.read?.[user.uid] ? 'bg-blue-50/50' : ''
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <div className={`p-2 rounded-lg ${
+                                notification.type === 'new_customer' 
+                                  ? 'bg-emerald-100 text-emerald-600'
+                                  : 'bg-amber-100 text-amber-600'
+                              }`}>
+                                {notification.type === 'new_customer' ? <UserPlus size={16} /> : <Megaphone size={16} />}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-medium text-slate-700 text-sm">{notification.title}</p>
+                                <p className="text-slate-500 text-sm truncate">{notification.message}</p>
+                                <p className="text-slate-400 text-xs mt-1">{formatTimeAgo(notification.createdAt)}</p>
+                              </div>
+                              {!notification.read?.[user.uid] && (
+                                <div className="w-2 h-2 bg-blue-500 rounded-full mt-2"></div>
+                              )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
                 )}
-              </button>
+              </div>
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-slate-600 to-gray-600 flex items-center justify-center font-medium text-white shadow-md">
                 {user.email?.[0]?.toUpperCase() || 'U'}
               </div>
@@ -521,6 +754,29 @@ export default function PlanitAdmin() {
               {/* 대시보드 */}
               {activeTab === 'dashboard' && (
                 <div className="space-y-8">
+                  {/* 중요 공지사항 배너 */}
+                  {announcements.filter(a => a.important).length > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4">
+                      <div className="flex items-center gap-3">
+                        <Megaphone className="text-amber-600" size={20} />
+                        <div className="flex-1">
+                          <p className="font-medium text-amber-800">
+                            {announcements.filter(a => a.important)[0].title}
+                          </p>
+                          <p className="text-sm text-amber-600 line-clamp-1">
+                            {announcements.filter(a => a.important)[0].content}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setActiveTab('announcements')}
+                          className="text-sm text-amber-700 hover:underline"
+                        >
+                          자세히 보기
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex gap-2">
                     {[
                       { id: 'day', label: '오늘' },
@@ -796,7 +1052,6 @@ export default function PlanitAdmin() {
               {/* 예약 스케줄 */}
               {activeTab === 'schedule' && (
                 <div className="space-y-6">
-                  {/* 날짜 선택 */}
                   <div className="flex items-center gap-4">
                     <button
                       onClick={() => {
@@ -835,7 +1090,6 @@ export default function PlanitAdmin() {
                     </span>
                   </div>
 
-                  {/* 타임테이블 */}
                   <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 overflow-hidden shadow-lg">
                     <div className="p-4 border-b border-slate-100 bg-slate-50/50">
                       <h3 className="font-semibold text-slate-700">예약 타임테이블</h3>
@@ -870,9 +1124,7 @@ export default function PlanitAdmin() {
                                   ))}
                                 </div>
                               ) : (
-                                <div className="h-full flex items-center text-slate-300 text-sm">
-                                  -
-                                </div>
+                                <div className="h-full flex items-center text-slate-300 text-sm">-</div>
                               )}
                             </div>
                           </div>
@@ -881,13 +1133,80 @@ export default function PlanitAdmin() {
                     </div>
                   </div>
 
-                  {/* 범례 */}
                   <div className="flex items-center gap-4">
                     <span className="text-sm text-slate-500">범례:</span>
                     <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">수술</span>
                     <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs">피부시술</span>
                     <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">상담</span>
                     <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">관리</span>
+                  </div>
+                </div>
+              )}
+
+              {/* 공지사항 */}
+              {activeTab === 'announcements' && (
+                <div className="space-y-6">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold text-slate-700">공지사항 목록</h2>
+                    <button
+                      onClick={() => { setEditingAnnouncement(null); setShowAnnouncementModal(true); }}
+                      className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-slate-600 to-gray-600 rounded-xl text-white font-medium hover:from-slate-700 hover:to-gray-700 transition-all shadow-lg"
+                    >
+                      <Plus size={18} />
+                      <span>공지 작성</span>
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    {announcements.length === 0 ? (
+                      <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-12 text-center shadow-lg">
+                        <Megaphone className="mx-auto text-slate-300 mb-4" size={48} />
+                        <p className="text-slate-400">등록된 공지사항이 없습니다.</p>
+                      </div>
+                    ) : (
+                      announcements.map(announcement => (
+                        <div
+                          key={announcement.id}
+                          className={`bg-white/80 backdrop-blur-sm rounded-2xl border shadow-lg overflow-hidden ${
+                            announcement.important ? 'border-amber-300 bg-amber-50/30' : 'border-slate-200'
+                          }`}
+                        >
+                          <div className="p-6">
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2 mb-2">
+                                  {announcement.important && (
+                                    <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-xs font-medium">
+                                      중요
+                                    </span>
+                                  )}
+                                  <h3 className="text-lg font-semibold text-slate-800">{announcement.title}</h3>
+                                </div>
+                                <p className="text-slate-600 whitespace-pre-wrap">{announcement.content}</p>
+                                <div className="flex items-center gap-4 mt-4 text-sm text-slate-400">
+                                  <span>{announcement.createdBy}</span>
+                                  <span>{formatTimeAgo(announcement.createdAt)}</span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => { setEditingAnnouncement(announcement); setShowAnnouncementModal(true); }}
+                                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                                >
+                                  <Edit2 size={16} />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteAnnouncement(announcement.id)}
+                                  className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
               )}
@@ -940,7 +1259,7 @@ export default function PlanitAdmin() {
         </div>
       </main>
 
-      {/* 고객 추가/수정 모달 */}
+      {/* 고객 모달 */}
       {showModal && (
         <CustomerModal
           customer={editingCustomer}
@@ -954,9 +1273,16 @@ export default function PlanitAdmin() {
         <CustomerDetailModal
           customer={selectedCustomer}
           onClose={() => { setShowDetailModal(false); setSelectedCustomer(null); }}
-          onUpdate={(updated) => {
-            setSelectedCustomer(updated);
-          }}
+          onUpdate={(updated) => setSelectedCustomer(updated)}
+        />
+      )}
+
+      {/* 공지사항 모달 */}
+      {showAnnouncementModal && (
+        <AnnouncementModal
+          announcement={editingAnnouncement}
+          onSave={handleSaveAnnouncement}
+          onClose={() => { setShowAnnouncementModal(false); setEditingAnnouncement(null); }}
         />
       )}
     </div>
@@ -1175,7 +1501,7 @@ function CustomerModal({ customer, onSave, onClose }) {
   );
 }
 
-// 고객 상세 모달 (전후사진 포함)
+// 고객 상세 모달
 function CustomerDetailModal({ customer, onClose, onUpdate }) {
   const [beforeImage, setBeforeImage] = useState(customer.beforeImage || null);
   const [afterImage, setAfterImage] = useState(customer.afterImage || null);
@@ -1192,7 +1518,6 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
       await uploadBytes(storageRef, file);
       const url = await getDownloadURL(storageRef);
       
-      // Firestore 업데이트
       const customerRef = doc(db, 'customers', customer.id);
       await updateDoc(customerRef, {
         [type === 'before' ? 'beforeImage' : 'afterImage']: url
@@ -1246,7 +1571,6 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
         </div>
 
         <div className="p-6">
-          {/* 고객 기본 정보 */}
           <div className="flex items-start gap-4 mb-6">
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-slate-400 to-gray-400 flex items-center justify-center text-white text-2xl font-bold">
               {customer.name?.[0]}
@@ -1279,7 +1603,6 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
             </div>
           </div>
 
-          {/* 예약 정보 */}
           <div className="grid grid-cols-3 gap-4 mb-6 p-4 bg-slate-50 rounded-xl">
             <div>
               <p className="text-sm text-slate-500">예약일</p>
@@ -1295,7 +1618,6 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
             </div>
           </div>
 
-          {/* 메모 */}
           {customer.memo && (
             <div className="mb-6 p-4 bg-amber-50 rounded-xl border border-amber-100">
               <p className="text-sm text-amber-600 font-medium mb-1">메모</p>
@@ -1303,7 +1625,6 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
             </div>
           )}
 
-          {/* 전후 사진 */}
           <div className="border-t border-slate-100 pt-6">
             <h4 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
               <Camera size={20} />
@@ -1318,7 +1639,6 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
             )}
 
             <div className="grid grid-cols-2 gap-6">
-              {/* Before 사진 */}
               <div>
                 <p className="text-sm font-medium text-slate-600 mb-2">시술 전 (Before)</p>
                 {beforeImage ? (
@@ -1361,7 +1681,6 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
                 />
               </div>
 
-              {/* After 사진 */}
               <div>
                 <p className="text-sm font-medium text-slate-600 mb-2">시술 후 (After)</p>
                 {afterImage ? (
@@ -1415,6 +1734,94 @@ function CustomerDetailModal({ customer, onClose, onUpdate }) {
             닫기
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// 공지사항 모달
+function AnnouncementModal({ announcement, onSave, onClose }) {
+  const [form, setForm] = useState(announcement || {
+    title: '',
+    content: '',
+    important: false
+  });
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!form.title.trim() || !form.content.trim()) {
+      alert('제목과 내용을 입력해주세요.');
+      return;
+    }
+    onSave(form);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+      <div className="w-full max-w-lg bg-white rounded-3xl border border-slate-200 shadow-2xl">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100">
+          <h2 className="text-xl font-semibold text-slate-800">
+            {announcement ? '공지사항 수정' : '새 공지사항'}
+          </h2>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-600 mb-2">제목 *</label>
+            <input
+              type="text"
+              required
+              value={form.title}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              placeholder="공지사항 제목"
+              className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-600 mb-2">내용 *</label>
+            <textarea
+              required
+              value={form.content}
+              onChange={(e) => setForm({ ...form, content: e.target.value })}
+              placeholder="공지사항 내용을 입력하세요"
+              rows={6}
+              className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400 resize-none"
+            />
+          </div>
+
+          <div className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              id="important"
+              checked={form.important}
+              onChange={(e) => setForm({ ...form, important: e.target.checked })}
+              className="w-5 h-5 rounded border-slate-300 text-amber-500 focus:ring-amber-500"
+            />
+            <label htmlFor="important" className="text-sm text-slate-600">
+              중요 공지 (대시보드 상단에 표시)
+            </label>
+          </div>
+
+          <div className="flex gap-3 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 px-4 py-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-colors"
+            >
+              취소
+            </button>
+            <button
+              type="submit"
+              className="flex-1 px-4 py-3 bg-gradient-to-r from-slate-600 to-gray-600 text-white rounded-xl hover:from-slate-700 hover:to-gray-700 transition-all font-medium shadow-lg"
+            >
+              {announcement ? '수정하기' : '등록하기'}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
