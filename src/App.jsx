@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff } from 'lucide-react';
+import { Users, TrendingUp, Calendar, CreditCard, Search, Plus, Edit2, Trash2, X, Download, Home, FileText, Menu, Bell, LogOut, Eye, EyeOff, Camera, Clock, ChevronLeft, ChevronRight, Image } from 'lucide-react';
 
 // Firebase imports
-import { auth, db } from './firebase';
+import { auth, db, storage } from './firebase';
 import { 
   signInWithEmailAndPassword, 
   signOut, 
@@ -19,18 +19,21 @@ import {
   onSnapshot,
   query,
   orderBy,
-  serverTimestamp 
+  serverTimestamp,
+  getDoc
 } from 'firebase/firestore';
+import {
+  ref,
+  uploadBytes,
+  getDownloadURL,
+  deleteObject
+} from 'firebase/storage';
 
 // 전화번호 포맷팅 함수
 const formatPhoneNumber = (value) => {
-  // 숫자만 추출
   const numbers = value.replace(/[^\d]/g, '');
-  
-  // 최대 11자리까지만
   const limited = numbers.slice(0, 11);
   
-  // 포맷팅
   if (limited.length <= 3) {
     return limited;
   } else if (limited.length <= 7) {
@@ -46,6 +49,13 @@ const visitSources = ['인터넷', '외부 소개', '지인 소개', '기존', '
 const paymentMethods = ['카드', '계좌이체', '현금'];
 const paymentStatuses = ['완납', '예약금', '잔금', '환불'];
 
+// 예약 시간 옵션
+const timeSlots = [
+  '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
+  '12:00', '12:30', '13:00', '13:30', '14:00', '14:30',
+  '15:00', '15:30', '16:00', '16:30', '17:00', '17:30', '18:00'
+];
+
 // 시술 목록 (카테고리별)
 const proceduresByCategory = {
   '수술': ['눈매교정', '코성형', '안면윤곽', '지방흡입', '가슴성형', '눈밑지방재배치', '이마거상', '안면거상'],
@@ -54,7 +64,7 @@ const proceduresByCategory = {
   '관리': ['리프팅관리', '재생관리', '미백관리', '모공관리', '여드름관리', '탄력관리']
 };
 
-// 통계 계산 함수 (환불 자동 차감 적용)
+// 통계 계산 함수
 const calculateStats = (customers, period = 'day') => {
   const today = new Date();
   const filtered = customers.filter(c => {
@@ -70,12 +80,10 @@ const calculateStats = (customers, period = 'day') => {
     return true;
   });
   
-  // 환불이 아닌 건만 총 매출에 포함
   const totalRevenue = filtered
     .filter(c => c.paymentStatus !== '환불')
     .reduce((sum, c) => sum + (c.amount > 0 ? c.amount : 0), 0);
   
-  // 환불 금액 계산 (환불 상태인 건의 금액)
   const totalRefund = filtered
     .filter(c => c.paymentStatus === '환불')
     .reduce((sum, c) => sum + Math.abs(c.amount || 0), 0);
@@ -92,7 +100,7 @@ const calculateStats = (customers, period = 'day') => {
   };
 };
 
-// 카테고리별 매출 계산 (0인 카테고리 제외)
+// 카테고리별 매출 계산
 const getCategoryRevenue = (customers) => {
   const categoryData = {};
   categories.forEach(cat => {
@@ -100,13 +108,12 @@ const getCategoryRevenue = (customers) => {
       .filter(c => c.category === cat && c.amount > 0 && c.paymentStatus !== '환불')
       .reduce((sum, c) => sum + c.amount, 0);
   });
-  // 0인 카테고리 제외
   return Object.entries(categoryData)
     .filter(([name, value]) => value > 0)
     .map(([name, value]) => ({ name, value }));
 };
 
-// 일별 매출 데이터 (최근 7일)
+// 일별 매출 데이터
 const getDailyRevenue = (customers) => {
   const data = [];
   for (let i = 6; i >= 0; i--) {
@@ -124,7 +131,7 @@ const getDailyRevenue = (customers) => {
   return data;
 };
 
-// 내원경로별 통계 (0인 항목 제외)
+// 내원경로별 통계
 const getSourceStats = (customers) => {
   const sourceData = {};
   visitSources.forEach(source => {
@@ -135,11 +142,10 @@ const getSourceStats = (customers) => {
     .map(([name, value]) => ({ name, value }));
 };
 
-// 뉴트럴 색상 팔레트
 const COLORS = ['#64748b', '#78716c', '#71717a', '#6b7280', '#737373'];
 
 // 로그인 컴포넌트
-function LoginPage({ onLogin }) {
+function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -181,18 +187,14 @@ function LoginPage({ onLogin }) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-zinc-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* 로고 */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-slate-600 to-gray-600 mb-4 shadow-lg shadow-slate-200">
             <span className="text-3xl font-bold text-white">P</span>
           </div>
-          <h1 className="text-3xl font-bold text-slate-800">
-            Planit
-          </h1>
+          <h1 className="text-3xl font-bold text-slate-800">Planit</h1>
           <p className="text-slate-500 mt-2">성형외과 통합 관리 시스템</p>
         </div>
 
-        {/* 로그인 폼 */}
         <div className="bg-white/80 backdrop-blur-sm rounded-3xl border border-slate-200 p-8 shadow-xl shadow-slate-100">
           <h2 className="text-xl font-semibold text-slate-800 mb-6">
             {isSignUp ? '새 계정 만들기' : '로그인'}
@@ -271,12 +273,14 @@ export default function PlanitAdmin() {
   const [filterCategory, setFilterCategory] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
   const [showModal, setShowModal] = useState(false);
+  const [showDetailModal, setShowDetailModal] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState(null);
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [statsPeriod, setStatsPeriod] = useState('month');
   const [dataLoading, setDataLoading] = useState(true);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
 
-  // 인증 상태 감지
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
@@ -285,7 +289,6 @@ export default function PlanitAdmin() {
     return () => unsubscribe();
   }, []);
 
-  // Firestore 실시간 데이터 구독
   useEffect(() => {
     if (!user) return;
 
@@ -308,7 +311,6 @@ export default function PlanitAdmin() {
     return () => unsubscribe();
   }, [user]);
 
-  // 고객 추가
   const handleAddCustomer = async (customerData) => {
     try {
       await addDoc(collection(db, 'customers'), {
@@ -323,7 +325,6 @@ export default function PlanitAdmin() {
     }
   };
 
-  // 고객 수정
   const handleUpdateCustomer = async (customerData) => {
     try {
       const customerRef = doc(db, 'customers', customerData.id);
@@ -340,7 +341,6 @@ export default function PlanitAdmin() {
     }
   };
 
-  // 고객 저장 (추가 또는 수정)
   const handleSaveCustomer = (customerData) => {
     if (customerData.id) {
       handleUpdateCustomer(customerData);
@@ -349,7 +349,6 @@ export default function PlanitAdmin() {
     }
   };
 
-  // 고객 삭제
   const handleDeleteCustomer = async (id) => {
     if (confirm('정말 삭제하시겠습니까?')) {
       try {
@@ -361,7 +360,6 @@ export default function PlanitAdmin() {
     }
   };
 
-  // 로그아웃
   const handleLogout = async () => {
     try {
       await signOut(auth);
@@ -370,7 +368,11 @@ export default function PlanitAdmin() {
     }
   };
 
-  // 필터링된 고객 목록
+  const handleViewDetail = (customer) => {
+    setSelectedCustomer(customer);
+    setShowDetailModal(true);
+  };
+
   const filteredCustomers = customers.filter(c => {
     const matchSearch = c.name?.includes(searchTerm) || c.phone?.includes(searchTerm) || c.procedure?.includes(searchTerm);
     const matchCategory = !filterCategory || c.category === filterCategory;
@@ -378,11 +380,10 @@ export default function PlanitAdmin() {
     return matchSearch && matchCategory && matchStatus;
   });
 
-  // CSV 내보내기
   const exportCSV = () => {
-    const headers = ['이름', '연락처', '대분류', '시술명', '내원경로', '결제수단', '납부상태', '금액', '날짜', '메모'];
+    const headers = ['이름', '연락처', '대분류', '시술명', '내원경로', '결제수단', '납부상태', '금액', '날짜', '예약시간', '메모'];
     const rows = filteredCustomers.map(c => [
-      c.name, c.phone, c.category, c.procedure, c.visitSource, c.paymentMethod, c.paymentStatus, c.amount, c.date, c.memo
+      c.name, c.phone, c.category, c.procedure, c.visitSource, c.paymentMethod, c.paymentStatus, c.amount, c.date, c.appointmentTime || '', c.memo
     ]);
     const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -393,7 +394,13 @@ export default function PlanitAdmin() {
     a.click();
   };
 
-  // 로딩 중
+  // 선택된 날짜의 예약 목록
+  const getAppointmentsForDate = (date) => {
+    return customers
+      .filter(c => c.date === date && c.appointmentTime)
+      .sort((a, b) => a.appointmentTime.localeCompare(b.appointmentTime));
+  };
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-zinc-100 flex items-center justify-center">
@@ -405,7 +412,6 @@ export default function PlanitAdmin() {
     );
   }
 
-  // 로그인 안됨
   if (!user) {
     return <LoginPage />;
   }
@@ -414,6 +420,7 @@ export default function PlanitAdmin() {
   const categoryRevenue = getCategoryRevenue(customers);
   const dailyRevenue = getDailyRevenue(customers);
   const sourceStats = getSourceStats(customers);
+  const todayAppointments = getAppointmentsForDate(selectedDate);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-zinc-100 text-slate-800 flex">
@@ -432,6 +439,7 @@ export default function PlanitAdmin() {
           {[
             { id: 'dashboard', icon: Home, label: '대시보드' },
             { id: 'customers', icon: Users, label: '고객 관리' },
+            { id: 'schedule', icon: Calendar, label: '예약 스케줄' },
             { id: 'records', icon: FileText, label: '시술 기록' },
           ].map(item => (
             <button
@@ -449,7 +457,6 @@ export default function PlanitAdmin() {
           ))}
         </nav>
 
-        {/* 사용자 정보 & 로그아웃 */}
         <div className="p-4 border-t border-slate-100 space-y-2">
           {sidebarOpen && (
             <div className="px-4 py-2 text-sm text-slate-500 truncate">
@@ -474,13 +481,13 @@ export default function PlanitAdmin() {
 
       {/* 메인 컨텐츠 */}
       <main className="flex-1 overflow-auto">
-        {/* 헤더 */}
         <header className="sticky top-0 z-10 bg-white/70 backdrop-blur-xl border-b border-slate-100 px-8 py-4 shadow-sm">
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-bold text-slate-800">
                 {activeTab === 'dashboard' && '대시보드'}
                 {activeTab === 'customers' && '고객 관리'}
+                {activeTab === 'schedule' && '예약 스케줄'}
                 {activeTab === 'records' && '시술 기록'}
               </h1>
               <p className="text-slate-400 text-sm mt-1">{new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p>
@@ -488,7 +495,11 @@ export default function PlanitAdmin() {
             <div className="flex items-center gap-4">
               <button className="p-2 rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200 transition-colors relative">
                 <Bell size={20} />
-                <span className="absolute top-1 right-1 w-2 h-2 bg-slate-500 rounded-full"></span>
+                {todayAppointments.length > 0 && (
+                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full text-white text-xs flex items-center justify-center">
+                    {todayAppointments.length}
+                  </span>
+                )}
               </button>
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-slate-600 to-gray-600 flex items-center justify-center font-medium text-white shadow-md">
                 {user.email?.[0]?.toUpperCase() || 'U'}
@@ -498,7 +509,6 @@ export default function PlanitAdmin() {
         </header>
 
         <div className="p-8">
-          {/* 데이터 로딩 */}
           {dataLoading ? (
             <div className="flex items-center justify-center h-64">
               <div className="text-center">
@@ -511,7 +521,6 @@ export default function PlanitAdmin() {
               {/* 대시보드 */}
               {activeTab === 'dashboard' && (
                 <div className="space-y-8">
-                  {/* 기간 선택 */}
                   <div className="flex gap-2">
                     {[
                       { id: 'day', label: '오늘' },
@@ -532,17 +541,14 @@ export default function PlanitAdmin() {
                     ))}
                   </div>
 
-                  {/* 통계 카드 */}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     <StatCard icon={TrendingUp} label="총 매출" value={`₩${stats.totalRevenue.toLocaleString()}`} color="slate" />
                     <StatCard icon={CreditCard} label="순 매출" value={`₩${stats.netRevenue.toLocaleString()}`} color="gray" />
                     <StatCard icon={Users} label="내원 고객" value={`${stats.customerCount}명`} color="zinc" />
-                    <StatCard icon={Calendar} label="상담 건수" value={`${stats.consultCount}건`} color="stone" />
+                    <StatCard icon={Calendar} label="오늘 예약" value={`${getAppointmentsForDate(new Date().toISOString().split('T')[0]).length}건`} color="stone" />
                   </div>
 
-                  {/* 차트 영역 */}
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {/* 일별 매출 추이 */}
                     <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
                       <h3 className="text-lg font-semibold mb-6 text-slate-700">일별 매출 추이</h3>
                       <ResponsiveContainer width="100%" height={280}>
@@ -552,7 +558,6 @@ export default function PlanitAdmin() {
                           <YAxis stroke="#64748b" fontSize={12} tickFormatter={(v) => `${(v/10000).toFixed(0)}만`} />
                           <Tooltip 
                             contentStyle={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px' }}
-                            labelStyle={{ color: '#475569' }}
                             formatter={(value) => [`₩${value.toLocaleString()}`, '매출']}
                           />
                           <Line type="monotone" dataKey="매출" stroke="#64748b" strokeWidth={3} dot={{ fill: '#64748b', strokeWidth: 2 }} />
@@ -560,7 +565,32 @@ export default function PlanitAdmin() {
                       </ResponsiveContainer>
                     </div>
 
-                    {/* 카테고리별 매출 */}
+                    <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
+                      <h3 className="text-lg font-semibold mb-6 text-slate-700">오늘의 예약</h3>
+                      <div className="space-y-2 max-h-[280px] overflow-y-auto">
+                        {getAppointmentsForDate(new Date().toISOString().split('T')[0]).map(apt => (
+                          <div key={apt.id} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
+                            <div className="w-16 text-center font-medium text-slate-600">{apt.appointmentTime}</div>
+                            <div className="flex-1">
+                              <p className="font-medium text-slate-700">{apt.name}</p>
+                              <p className="text-sm text-slate-500">{apt.procedure}</p>
+                            </div>
+                            <span className={`px-2 py-1 rounded-md text-xs font-medium ${
+                              apt.category === '수술' ? 'bg-slate-200 text-slate-700' :
+                              apt.category === '피부시술' ? 'bg-gray-200 text-gray-700' :
+                              apt.category === '상담' ? 'bg-zinc-200 text-zinc-700' :
+                              'bg-stone-200 text-stone-700'
+                            }`}>
+                              {apt.category}
+                            </span>
+                          </div>
+                        ))}
+                        {getAppointmentsForDate(new Date().toISOString().split('T')[0]).length === 0 && (
+                          <p className="text-center text-slate-400 py-8">오늘 예약이 없습니다.</p>
+                        )}
+                      </div>
+                    </div>
+
                     <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
                       <h3 className="text-lg font-semibold mb-6 text-slate-700">카테고리별 매출</h3>
                       {categoryRevenue.length > 0 ? (
@@ -581,20 +611,14 @@ export default function PlanitAdmin() {
                                 <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                               ))}
                             </Pie>
-                            <Tooltip 
-                              contentStyle={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px' }}
-                              formatter={(value) => [`₩${value.toLocaleString()}`, '매출']}
-                            />
+                            <Tooltip formatter={(value) => [`₩${value.toLocaleString()}`, '매출']} />
                           </PieChart>
                         </ResponsiveContainer>
                       ) : (
-                        <div className="flex items-center justify-center h-[280px] text-slate-400">
-                          데이터가 없습니다
-                        </div>
+                        <div className="flex items-center justify-center h-[280px] text-slate-400">데이터가 없습니다</div>
                       )}
                     </div>
 
-                    {/* 내원경로 분석 */}
                     <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
                       <h3 className="text-lg font-semibold mb-6 text-slate-700">내원경로 분석</h3>
                       {sourceStats.length > 0 ? (
@@ -603,45 +627,13 @@ export default function PlanitAdmin() {
                             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                             <XAxis type="number" stroke="#64748b" fontSize={12} />
                             <YAxis type="category" dataKey="name" stroke="#64748b" fontSize={12} width={80} />
-                            <Tooltip 
-                              contentStyle={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '12px' }}
-                              formatter={(value) => [`${value}명`, '고객 수']}
-                            />
+                            <Tooltip formatter={(value) => [`${value}명`, '고객 수']} />
                             <Bar dataKey="value" fill="#64748b" radius={[0, 8, 8, 0]} />
                           </BarChart>
                         </ResponsiveContainer>
                       ) : (
-                        <div className="flex items-center justify-center h-[280px] text-slate-400">
-                          데이터가 없습니다
-                        </div>
+                        <div className="flex items-center justify-center h-[280px] text-slate-400">데이터가 없습니다</div>
                       )}
-                    </div>
-
-                    {/* 최근 고객 */}
-                    <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 p-6 shadow-lg">
-                      <h3 className="text-lg font-semibold mb-6 text-slate-700">최근 고객</h3>
-                      <div className="space-y-3">
-                        {customers.slice(0, 5).map(customer => (
-                          <div key={customer.id} className="flex items-center justify-between p-3 bg-slate-50/50 rounded-xl">
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-slate-400 to-gray-400 flex items-center justify-center text-white font-medium">
-                                {customer.name?.[0]}
-                              </div>
-                              <div>
-                                <p className="font-medium text-slate-700">{customer.name}</p>
-                                <p className="text-sm text-slate-400">{customer.procedure}</p>
-                              </div>
-                            </div>
-                            <div className="text-right">
-                              <p className="font-medium text-slate-700">₩{customer.amount?.toLocaleString()}</p>
-                              <p className="text-sm text-slate-400">{customer.date}</p>
-                            </div>
-                          </div>
-                        ))}
-                        {customers.length === 0 && (
-                          <p className="text-center text-slate-400 py-8">등록된 고객이 없습니다.</p>
-                        )}
-                      </div>
                     </div>
                   </div>
                 </div>
@@ -650,7 +642,6 @@ export default function PlanitAdmin() {
               {/* 고객 관리 */}
               {activeTab === 'customers' && (
                 <div className="space-y-6">
-                  {/* 툴바 */}
                   <div className="flex flex-wrap items-center gap-4">
                     <div className="flex-1 min-w-[200px] relative">
                       <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -659,14 +650,14 @@ export default function PlanitAdmin() {
                         placeholder="이름, 연락처, 시술명 검색..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full pl-12 pr-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-700 placeholder-slate-400 focus:outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100 transition-all"
+                        className="w-full pl-12 pr-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-700 placeholder-slate-400 focus:outline-none focus:border-slate-400 transition-all"
                       />
                     </div>
                     
                     <select
                       value={filterCategory}
                       onChange={(e) => setFilterCategory(e.target.value)}
-                      className="px-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-700 focus:outline-none focus:border-slate-400 transition-colors"
+                      className="px-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-700 focus:outline-none"
                     >
                       <option value="">전체 카테고리</option>
                       {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
@@ -675,7 +666,7 @@ export default function PlanitAdmin() {
                     <select
                       value={filterStatus}
                       onChange={(e) => setFilterStatus(e.target.value)}
-                      className="px-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-700 focus:outline-none focus:border-slate-400 transition-colors"
+                      className="px-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-700 focus:outline-none"
                     >
                       <option value="">전체 납부상태</option>
                       {paymentStatuses.map(status => <option key={status} value={status}>{status}</option>)}
@@ -683,7 +674,7 @@ export default function PlanitAdmin() {
 
                     <button
                       onClick={exportCSV}
-                      className="flex items-center gap-2 px-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-100 hover:border-slate-300 transition-colors"
+                      className="flex items-center gap-2 px-4 py-3 bg-white/70 border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-100 transition-colors"
                     >
                       <Download size={18} />
                       <span>내보내기</span>
@@ -691,14 +682,13 @@ export default function PlanitAdmin() {
 
                     <button
                       onClick={() => { setEditingCustomer(null); setShowModal(true); }}
-                      className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-slate-600 to-gray-600 rounded-xl text-white font-medium hover:from-slate-700 hover:to-gray-700 transition-all shadow-lg shadow-slate-200"
+                      className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-slate-600 to-gray-600 rounded-xl text-white font-medium hover:from-slate-700 hover:to-gray-700 transition-all shadow-lg"
                     >
                       <Plus size={18} />
                       <span>새 고객</span>
                     </button>
                   </div>
 
-                  {/* 고객 테이블 */}
                   <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 overflow-hidden shadow-lg">
                     <div className="overflow-x-auto">
                       <table className="w-full">
@@ -708,8 +698,7 @@ export default function PlanitAdmin() {
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">연락처</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">대분류</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">시술명</th>
-                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">내원경로</th>
-                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">결제</th>
+                            <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">예약시간</th>
                             <th className="text-left px-6 py-4 text-sm font-medium text-slate-500">납부상태</th>
                             <th className="text-right px-6 py-4 text-sm font-medium text-slate-500">금액</th>
                             <th className="text-center px-6 py-4 text-sm font-medium text-slate-500">날짜</th>
@@ -720,12 +709,15 @@ export default function PlanitAdmin() {
                           {filteredCustomers.map(customer => (
                             <tr key={customer.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
                               <td className="px-6 py-4">
-                                <div className="flex items-center gap-3">
+                                <button
+                                  onClick={() => handleViewDetail(customer)}
+                                  className="flex items-center gap-3 hover:text-slate-900"
+                                >
                                   <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-400 to-gray-400 flex items-center justify-center text-white text-sm font-medium">
                                     {customer.name?.[0]}
                                   </div>
-                                  <span className="font-medium text-slate-700">{customer.name}</span>
-                                </div>
+                                  <span className="font-medium text-slate-700 hover:underline">{customer.name}</span>
+                                </button>
                               </td>
                               <td className="px-6 py-4 text-slate-600">{customer.phone}</td>
                               <td className="px-6 py-4">
@@ -739,8 +731,14 @@ export default function PlanitAdmin() {
                                 </span>
                               </td>
                               <td className="px-6 py-4 text-slate-600">{customer.procedure}</td>
-                              <td className="px-6 py-4 text-slate-500">{customer.visitSource}</td>
-                              <td className="px-6 py-4 text-slate-500">{customer.paymentMethod || '-'}</td>
+                              <td className="px-6 py-4 text-slate-600">
+                                {customer.appointmentTime && (
+                                  <span className="flex items-center gap-1">
+                                    <Clock size={14} />
+                                    {customer.appointmentTime}
+                                  </span>
+                                )}
+                              </td>
                               <td className="px-6 py-4">
                                 {customer.paymentStatus && (
                                   <span className={`px-2 py-1 rounded-md text-xs font-medium ${
@@ -759,6 +757,13 @@ export default function PlanitAdmin() {
                               <td className="px-6 py-4 text-center text-slate-500">{customer.date}</td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center justify-center gap-2">
+                                  <button
+                                    onClick={() => handleViewDetail(customer)}
+                                    className="p-2 text-slate-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                                    title="상세보기"
+                                  >
+                                    <Image size={16} />
+                                  </button>
                                   <button
                                     onClick={() => { setEditingCustomer(customer); setShowModal(true); }}
                                     className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
@@ -781,9 +786,108 @@ export default function PlanitAdmin() {
                     
                     {filteredCustomers.length === 0 && (
                       <div className="text-center py-12 text-slate-400">
-                        {customers.length === 0 ? '등록된 고객이 없습니다. 새 고객을 등록해주세요.' : '검색 결과가 없습니다.'}
+                        {customers.length === 0 ? '등록된 고객이 없습니다.' : '검색 결과가 없습니다.'}
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* 예약 스케줄 */}
+              {activeTab === 'schedule' && (
+                <div className="space-y-6">
+                  {/* 날짜 선택 */}
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => {
+                        const date = new Date(selectedDate);
+                        date.setDate(date.getDate() - 1);
+                        setSelectedDate(date.toISOString().split('T')[0]);
+                      }}
+                      className="p-2 bg-white/70 border border-slate-200 rounded-xl hover:bg-slate-100 transition-colors"
+                    >
+                      <ChevronLeft size={20} />
+                    </button>
+                    <input
+                      type="date"
+                      value={selectedDate}
+                      onChange={(e) => setSelectedDate(e.target.value)}
+                      className="px-4 py-2 bg-white/70 border border-slate-200 rounded-xl text-slate-700 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => {
+                        const date = new Date(selectedDate);
+                        date.setDate(date.getDate() + 1);
+                        setSelectedDate(date.toISOString().split('T')[0]);
+                      }}
+                      className="p-2 bg-white/70 border border-slate-200 rounded-xl hover:bg-slate-100 transition-colors"
+                    >
+                      <ChevronRight size={20} />
+                    </button>
+                    <button
+                      onClick={() => setSelectedDate(new Date().toISOString().split('T')[0])}
+                      className="px-4 py-2 bg-slate-600 text-white rounded-xl hover:bg-slate-700 transition-colors"
+                    >
+                      오늘
+                    </button>
+                    <span className="text-lg font-semibold text-slate-700">
+                      {new Date(selectedDate).toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}
+                    </span>
+                  </div>
+
+                  {/* 타임테이블 */}
+                  <div className="bg-white/80 backdrop-blur-sm rounded-2xl border border-slate-200 overflow-hidden shadow-lg">
+                    <div className="p-4 border-b border-slate-100 bg-slate-50/50">
+                      <h3 className="font-semibold text-slate-700">예약 타임테이블</h3>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                      {timeSlots.map(time => {
+                        const appointments = customers.filter(
+                          c => c.date === selectedDate && c.appointmentTime === time
+                        );
+                        return (
+                          <div key={time} className="flex">
+                            <div className="w-20 px-4 py-3 bg-slate-50/50 text-sm font-medium text-slate-600 border-r border-slate-100">
+                              {time}
+                            </div>
+                            <div className="flex-1 px-4 py-2 min-h-[60px]">
+                              {appointments.length > 0 ? (
+                                <div className="flex flex-wrap gap-2">
+                                  {appointments.map(apt => (
+                                    <button
+                                      key={apt.id}
+                                      onClick={() => handleViewDetail(apt)}
+                                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-all hover:scale-105 ${
+                                        apt.category === '수술' ? 'bg-red-100 text-red-700 border border-red-200' :
+                                        apt.category === '피부시술' ? 'bg-purple-100 text-purple-700 border border-purple-200' :
+                                        apt.category === '상담' ? 'bg-blue-100 text-blue-700 border border-blue-200' :
+                                        'bg-green-100 text-green-700 border border-green-200'
+                                      }`}
+                                    >
+                                      <span className="font-semibold">{apt.name}</span>
+                                      <span className="ml-2 opacity-75">{apt.procedure}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="h-full flex items-center text-slate-300 text-sm">
+                                  -
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 범례 */}
+                  <div className="flex items-center gap-4">
+                    <span className="text-sm text-slate-500">범례:</span>
+                    <span className="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">수술</span>
+                    <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs">피부시술</span>
+                    <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">상담</span>
+                    <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">관리</span>
                   </div>
                 </div>
               )}
@@ -844,11 +948,22 @@ export default function PlanitAdmin() {
           onClose={() => { setShowModal(false); setEditingCustomer(null); }}
         />
       )}
+
+      {/* 고객 상세 모달 */}
+      {showDetailModal && selectedCustomer && (
+        <CustomerDetailModal
+          customer={selectedCustomer}
+          onClose={() => { setShowDetailModal(false); setSelectedCustomer(null); }}
+          onUpdate={(updated) => {
+            setSelectedCustomer(updated);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-// 통계 카드 컴포넌트
+// 통계 카드
 function StatCard({ icon: Icon, label, value, color }) {
   const colorClasses = {
     slate: 'from-slate-100 to-slate-50 border-slate-200 text-slate-600',
@@ -860,7 +975,7 @@ function StatCard({ icon: Icon, label, value, color }) {
   return (
     <div className={`bg-gradient-to-br ${colorClasses[color]} border rounded-2xl p-6 shadow-lg`}>
       <div className="flex items-center gap-3 mb-4">
-        <div className={`p-2 rounded-lg bg-white/70`}>
+        <div className="p-2 rounded-lg bg-white/70">
           <Icon size={20} />
         </div>
         <span className="text-sm font-medium">{label}</span>
@@ -870,7 +985,7 @@ function StatCard({ icon: Icon, label, value, color }) {
   );
 }
 
-// 고객 모달 컴포넌트
+// 고객 모달
 function CustomerModal({ customer, onSave, onClose }) {
   const [form, setForm] = useState(customer || {
     name: '',
@@ -882,10 +997,10 @@ function CustomerModal({ customer, onSave, onClose }) {
     paymentStatus: '완납',
     amount: 0,
     date: new Date().toISOString().split('T')[0],
+    appointmentTime: '',
     memo: ''
   });
 
-  // 전화번호 입력 핸들러
   const handlePhoneChange = (e) => {
     const formatted = formatPhoneNumber(e.target.value);
     setForm({ ...form, phone: formatted });
@@ -898,8 +1013,8 @@ function CustomerModal({ customer, onSave, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-      <div className="w-full max-w-lg bg-white rounded-3xl border border-slate-200 shadow-2xl">
-        <div className="flex items-center justify-between p-6 border-b border-slate-100">
+      <div className="w-full max-w-lg bg-white rounded-3xl border border-slate-200 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100 sticky top-0 bg-white rounded-t-3xl">
           <h2 className="text-xl font-semibold text-slate-800">
             {customer ? '고객 정보 수정' : '새 고객 등록'}
           </h2>
@@ -917,7 +1032,7 @@ function CustomerModal({ customer, onSave, onClose }) {
                 required
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
               />
             </div>
             <div>
@@ -928,7 +1043,7 @@ function CustomerModal({ customer, onSave, onClose }) {
                 value={form.phone}
                 onChange={handlePhoneChange}
                 placeholder="010-0000-0000"
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
               />
             </div>
           </div>
@@ -939,7 +1054,7 @@ function CustomerModal({ customer, onSave, onClose }) {
               <select
                 value={form.category}
                 onChange={(e) => setForm({ ...form, category: e.target.value, procedure: '' })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
               >
                 {categories.map(cat => <option key={cat} value={cat}>{cat}</option>)}
               </select>
@@ -949,7 +1064,7 @@ function CustomerModal({ customer, onSave, onClose }) {
               <select
                 value={form.procedure}
                 onChange={(e) => setForm({ ...form, procedure: e.target.value })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
               >
                 <option value="">선택하세요</option>
                 {proceduresByCategory[form.category]?.map(proc => (
@@ -961,11 +1076,34 @@ function CustomerModal({ customer, onSave, onClose }) {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
+              <label className="block text-sm font-medium text-slate-600 mb-2">예약 날짜 *</label>
+              <input
+                type="date"
+                value={form.date}
+                onChange={(e) => setForm({ ...form, date: e.target.value })}
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-600 mb-2">예약 시간</label>
+              <select
+                value={form.appointmentTime}
+                onChange={(e) => setForm({ ...form, appointmentTime: e.target.value })}
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
+              >
+                <option value="">선택하세요</option>
+                {timeSlots.map(time => <option key={time} value={time}>{time}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
               <label className="block text-sm font-medium text-slate-600 mb-2">내원경로</label>
               <select
                 value={form.visitSource}
                 onChange={(e) => setForm({ ...form, visitSource: e.target.value })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
               >
                 {visitSources.map(src => <option key={src} value={src}>{src}</option>)}
               </select>
@@ -975,7 +1113,7 @@ function CustomerModal({ customer, onSave, onClose }) {
               <select
                 value={form.paymentMethod}
                 onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
               >
                 <option value="">선택하세요</option>
                 {paymentMethods.map(m => <option key={m} value={m}>{m}</option>)}
@@ -983,13 +1121,13 @@ function CustomerModal({ customer, onSave, onClose }) {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-slate-600 mb-2">납부상태</label>
               <select
                 value={form.paymentStatus}
                 onChange={(e) => setForm({ ...form, paymentStatus: e.target.value })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
               >
                 <option value="">선택하세요</option>
                 {paymentStatuses.map(s => <option key={s} value={s}>{s}</option>)}
@@ -1001,16 +1139,7 @@ function CustomerModal({ customer, onSave, onClose }) {
                 type="number"
                 value={form.amount}
                 onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-600 mb-2">날짜</label>
-              <input
-                type="date"
-                value={form.date}
-                onChange={(e) => setForm({ ...form, date: e.target.value })}
-                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+                className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none"
               />
             </div>
           </div>
@@ -1021,7 +1150,7 @@ function CustomerModal({ customer, onSave, onClose }) {
               value={form.memo}
               onChange={(e) => setForm({ ...form, memo: e.target.value })}
               rows={2}
-              className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100 resize-none"
+              className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none resize-none"
             />
           </div>
 
@@ -1035,12 +1164,257 @@ function CustomerModal({ customer, onSave, onClose }) {
             </button>
             <button
               type="submit"
-              className="flex-1 px-4 py-3 bg-gradient-to-r from-slate-600 to-gray-600 text-white rounded-xl hover:from-slate-700 hover:to-gray-700 transition-all font-medium shadow-lg shadow-slate-200"
+              className="flex-1 px-4 py-3 bg-gradient-to-r from-slate-600 to-gray-600 text-white rounded-xl hover:from-slate-700 hover:to-gray-700 transition-all font-medium shadow-lg"
             >
               {customer ? '수정하기' : '등록하기'}
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// 고객 상세 모달 (전후사진 포함)
+function CustomerDetailModal({ customer, onClose, onUpdate }) {
+  const [beforeImage, setBeforeImage] = useState(customer.beforeImage || null);
+  const [afterImage, setAfterImage] = useState(customer.afterImage || null);
+  const [uploading, setUploading] = useState(false);
+  const beforeInputRef = useRef(null);
+  const afterInputRef = useRef(null);
+
+  const handleImageUpload = async (file, type) => {
+    if (!file) return;
+    
+    setUploading(true);
+    try {
+      const storageRef = ref(storage, `customers/${customer.id}/${type}_${Date.now()}`);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
+      
+      // Firestore 업데이트
+      const customerRef = doc(db, 'customers', customer.id);
+      await updateDoc(customerRef, {
+        [type === 'before' ? 'beforeImage' : 'afterImage']: url
+      });
+
+      if (type === 'before') {
+        setBeforeImage(url);
+      } else {
+        setAfterImage(url);
+      }
+      
+      onUpdate({ ...customer, [type === 'before' ? 'beforeImage' : 'afterImage']: url });
+    } catch (error) {
+      console.error('Error uploading image:', error);
+      alert('이미지 업로드에 실패했습니다.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDeleteImage = async (type) => {
+    if (!confirm('이미지를 삭제하시겠습니까?')) return;
+    
+    try {
+      const customerRef = doc(db, 'customers', customer.id);
+      await updateDoc(customerRef, {
+        [type === 'before' ? 'beforeImage' : 'afterImage']: null
+      });
+
+      if (type === 'before') {
+        setBeforeImage(null);
+      } else {
+        setAfterImage(null);
+      }
+      
+      onUpdate({ ...customer, [type === 'before' ? 'beforeImage' : 'afterImage']: null });
+    } catch (error) {
+      console.error('Error deleting image:', error);
+      alert('이미지 삭제에 실패했습니다.');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+      <div className="w-full max-w-3xl bg-white rounded-3xl border border-slate-200 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100 sticky top-0 bg-white rounded-t-3xl">
+          <h2 className="text-xl font-semibold text-slate-800">고객 상세 정보</h2>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="p-6">
+          {/* 고객 기본 정보 */}
+          <div className="flex items-start gap-4 mb-6">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-slate-400 to-gray-400 flex items-center justify-center text-white text-2xl font-bold">
+              {customer.name?.[0]}
+            </div>
+            <div className="flex-1">
+              <h3 className="text-xl font-bold text-slate-800">{customer.name}</h3>
+              <p className="text-slate-500">{customer.phone}</p>
+              <div className="flex items-center gap-2 mt-2">
+                <span className={`px-2 py-1 rounded-md text-xs font-medium ${
+                  customer.category === '수술' ? 'bg-slate-200 text-slate-700' :
+                  customer.category === '피부시술' ? 'bg-gray-200 text-gray-700' :
+                  customer.category === '상담' ? 'bg-zinc-200 text-zinc-700' :
+                  'bg-stone-200 text-stone-700'
+                }`}>
+                  {customer.category}
+                </span>
+                <span className="text-slate-600">{customer.procedure}</span>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-2xl font-bold text-slate-800">₩{customer.amount?.toLocaleString()}</p>
+              <p className={`text-sm font-medium ${
+                customer.paymentStatus === '완납' ? 'text-emerald-600' :
+                customer.paymentStatus === '예약금' ? 'text-amber-600' :
+                customer.paymentStatus === '잔금' ? 'text-orange-600' :
+                'text-red-600'
+              }`}>
+                {customer.paymentStatus}
+              </p>
+            </div>
+          </div>
+
+          {/* 예약 정보 */}
+          <div className="grid grid-cols-3 gap-4 mb-6 p-4 bg-slate-50 rounded-xl">
+            <div>
+              <p className="text-sm text-slate-500">예약일</p>
+              <p className="font-medium text-slate-700">{customer.date}</p>
+            </div>
+            <div>
+              <p className="text-sm text-slate-500">예약시간</p>
+              <p className="font-medium text-slate-700">{customer.appointmentTime || '-'}</p>
+            </div>
+            <div>
+              <p className="text-sm text-slate-500">내원경로</p>
+              <p className="font-medium text-slate-700">{customer.visitSource}</p>
+            </div>
+          </div>
+
+          {/* 메모 */}
+          {customer.memo && (
+            <div className="mb-6 p-4 bg-amber-50 rounded-xl border border-amber-100">
+              <p className="text-sm text-amber-600 font-medium mb-1">메모</p>
+              <p className="text-slate-700">{customer.memo}</p>
+            </div>
+          )}
+
+          {/* 전후 사진 */}
+          <div className="border-t border-slate-100 pt-6">
+            <h4 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
+              <Camera size={20} />
+              시술 전/후 사진
+            </h4>
+            
+            {uploading && (
+              <div className="text-center py-4 text-slate-500">
+                <div className="w-6 h-6 border-2 border-slate-400 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                업로드 중...
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-6">
+              {/* Before 사진 */}
+              <div>
+                <p className="text-sm font-medium text-slate-600 mb-2">시술 전 (Before)</p>
+                {beforeImage ? (
+                  <div className="relative group">
+                    <img 
+                      src={beforeImage} 
+                      alt="Before" 
+                      className="w-full h-64 object-cover rounded-xl border border-slate-200"
+                    />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center gap-2">
+                      <button
+                        onClick={() => beforeInputRef.current?.click()}
+                        className="p-2 bg-white rounded-lg text-slate-700 hover:bg-slate-100"
+                      >
+                        <Edit2 size={18} />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteImage('before')}
+                        className="p-2 bg-white rounded-lg text-red-600 hover:bg-red-50"
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => beforeInputRef.current?.click()}
+                    className="w-full h-64 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center text-slate-400 hover:border-slate-400 hover:text-slate-500 transition-colors"
+                  >
+                    <Camera size={32} className="mb-2" />
+                    <span>사진 추가</span>
+                  </button>
+                )}
+                <input
+                  ref={beforeInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleImageUpload(e.target.files[0], 'before')}
+                  className="hidden"
+                />
+              </div>
+
+              {/* After 사진 */}
+              <div>
+                <p className="text-sm font-medium text-slate-600 mb-2">시술 후 (After)</p>
+                {afterImage ? (
+                  <div className="relative group">
+                    <img 
+                      src={afterImage} 
+                      alt="After" 
+                      className="w-full h-64 object-cover rounded-xl border border-slate-200"
+                    />
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center gap-2">
+                      <button
+                        onClick={() => afterInputRef.current?.click()}
+                        className="p-2 bg-white rounded-lg text-slate-700 hover:bg-slate-100"
+                      >
+                        <Edit2 size={18} />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteImage('after')}
+                        className="p-2 bg-white rounded-lg text-red-600 hover:bg-red-50"
+                      >
+                        <Trash2 size={18} />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => afterInputRef.current?.click()}
+                    className="w-full h-64 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center text-slate-400 hover:border-slate-400 hover:text-slate-500 transition-colors"
+                  >
+                    <Camera size={32} className="mb-2" />
+                    <span>사진 추가</span>
+                  </button>
+                )}
+                <input
+                  ref={afterInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleImageUpload(e.target.files[0], 'after')}
+                  className="hidden"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-6 border-t border-slate-100">
+          <button
+            onClick={onClose}
+            className="w-full px-4 py-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-colors"
+          >
+            닫기
+          </button>
+        </div>
       </div>
     </div>
   );
