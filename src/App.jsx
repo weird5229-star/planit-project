@@ -132,7 +132,7 @@ const getCategoryRevenue = (customers) => {
   const categoryData = {};
   categories.forEach(cat => {
     categoryData[cat] = customers
-      .filter(c => c.category === cat && c.amount > 0 && c.paymentStatus !== '환불' && c.status !== '환불')
+      .filter(c => c.category === cat && c.amount > 0 && c.paymentStatus !== '환불' && c.status !== '환불' && c.status !== '노쇼')
       .reduce((sum, c) => sum + c.amount, 0);
   });
   return Object.entries(categoryData)
@@ -147,7 +147,7 @@ const getDailyRevenue = (customers) => {
     date.setDate(date.getDate() - i);
     const dateStr = date.toISOString().split('T')[0];
     const dayRevenue = customers
-      .filter(c => c.date === dateStr && c.amount > 0 && c.paymentStatus !== '환불' && c.status !== '환불')
+      .filter(c => c.date === dateStr && c.amount > 0 && c.paymentStatus !== '환불' && c.status !== '환불' && c.status !== '노쇼')
       .reduce((sum, c) => sum + c.amount, 0);
     data.push({
       date: `${date.getMonth() + 1}/${date.getDate()}`,
@@ -160,7 +160,7 @@ const getDailyRevenue = (customers) => {
 const getSourceStats = (customers) => {
   const sourceData = {};
   visitSources.forEach(source => {
-    sourceData[source] = customers.filter(c => c.visitSource === source && c.paymentStatus !== '환불' && c.status !== '환불').length;
+    sourceData[source] = customers.filter(c => c.visitSource === source && c.paymentStatus !== '환불' && c.status !== '환불' && c.status !== '노쇼').length;
   });
   return Object.entries(sourceData)
     .filter(([name, value]) => value > 0)
@@ -549,6 +549,27 @@ export default function PlanitAdmin() {
       } catch (error) {
         console.error('Error processing refund:', error);
         alert('환불 처리에 실패했습니다.');
+      }
+    }
+  };
+
+  // 상태 복구 처리 (노쇼/환불 → 내원)
+  const handleRestoreStatus = async (customerId, previousPaymentStatus) => {
+    if (confirm('상태를 복구하시겠습니까?')) {
+      try {
+        const customerRef = doc(db, 'customers', customerId);
+        await updateDoc(customerRef, {
+          status: '내원',
+          paymentStatus: previousPaymentStatus || '완납',
+          updatedAt: serverTimestamp(),
+          updatedBy: user.email
+        });
+        
+        // selectedCustomer 업데이트
+        setSelectedCustomer(prev => prev ? { ...prev, status: '내원', paymentStatus: previousPaymentStatus || '완납' } : null);
+      } catch (error) {
+        console.error('Error restoring status:', error);
+        alert('상태 복구에 실패했습니다.');
       }
     }
   };
@@ -1485,7 +1506,7 @@ export default function PlanitAdmin() {
                     <h3 className="text-lg font-semibold mb-6 text-slate-700">시술 카테고리별 통계</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                       {categories.map((cat, index) => {
-                        const catCustomers = customers.filter(c => c.category === cat && c.paymentStatus !== '환불' && c.status !== '환불');
+                        const catCustomers = customers.filter(c => c.category === cat && c.paymentStatus !== '환불' && c.status !== '환불' && c.status !== '노쇼');
                         const catRevenue = catCustomers.reduce((sum, c) => sum + (c.amount > 0 ? c.amount : 0), 0);
                         return (
                           <div key={cat} className="rounded-xl p-4" style={{ backgroundColor: `${PASTEL_COLORS[index]}40` }}>
@@ -1544,6 +1565,7 @@ export default function PlanitAdmin() {
           onUpdate={(updated) => setSelectedCustomer(updated)}
           onNoShow={handleNoShow}
           onRefund={handleRefund}
+          onRestoreStatus={handleRestoreStatus}
         />
       )}
 
@@ -1832,7 +1854,7 @@ function CustomerModal({ customer, userProfile, onSave, onClose }) {
 }
 
 // 고객 상세 모달 (노쇼/환불 버튼 추가)
-function CustomerDetailModal({ customer, onClose, onUpdate, onNoShow, onRefund }) {
+function CustomerDetailModal({ customer, onClose, onUpdate, onNoShow, onRefund, onRestoreStatus }) {
   const [beforeImage, setBeforeImage] = useState(customer.beforeImage || null);
   const [afterImage, setAfterImage] = useState(customer.afterImage || null);
   const [uploading, setUploading] = useState(false);
@@ -1962,8 +1984,8 @@ function CustomerDetailModal({ customer, onClose, onUpdate, onNoShow, onRefund }
             </div>
           </div>
 
-          {/* 노쇼/환불 버튼 */}
-          {customer.status !== '노쇼' && customer.status !== '환불' && (
+          {/* 노쇼/환불 버튼 또는 상태 복구 버튼 */}
+          {customer.status !== '노쇼' && customer.status !== '환불' ? (
             <div className="flex gap-3 mb-6">
               <button
                 onClick={() => onNoShow(customer.id)}
@@ -1978,6 +2000,16 @@ function CustomerDetailModal({ customer, onClose, onUpdate, onNoShow, onRefund }
               >
                 <RefreshCcw size={18} />
                 환불 처리
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-3 mb-6">
+              <button
+                onClick={() => onRestoreStatus(customer.id, customer.status === '노쇼' ? customer.paymentStatus : '완납')}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-emerald-50 text-emerald-600 rounded-xl border border-emerald-200 hover:bg-emerald-100 transition-colors font-medium"
+              >
+                <User size={18} />
+                상태 복구 (내원으로 변경)
               </button>
             </div>
           )}
